@@ -997,22 +997,33 @@ function BalanceDetail({ db, user, onClose, onFull }) {
   );
 }
 
-/* ── exports (Excel / PDF) — loaded on demand so they don't bloat startup ── */
+/* ── exports (Excel / PDF) ──────────────────────────────────────────────────
+   The export libraries are fetched on demand from a CDN, so they are NOT npm
+   or build dependencies — nothing to install, nothing to bundle, and the app
+   loads fine without them. They're only downloaded the moment you export.
+   (Loaded via a variable URL so the bundler treats them as runtime-external.) */
+const EXPORT_CDN = {
+  xlsx: "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs",
+  jspdf: "https://esm.sh/jspdf@2.5.2",
+  autotable: "https://esm.sh/jspdf-autotable@3.8.4",
+};
 async function exportRowsToExcel(filename, sheetName, columns, rows) {
   try {
-    const XLSX = await import("xlsx");
+    const mod = await import(/* @vite-ignore */ EXPORT_CDN.xlsx);
+    const XLSX = mod.utils ? mod : (mod.default || mod);
     const aoa = [columns.map((c) => c.label), ...rows.map((r) => columns.map((c) => c.value(r)))];
     const ws = XLSX.utils.aoa_to_sheet(aoa);
     ws["!cols"] = columns.map((c) => ({ wch: c.w || 14 }));
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, (sheetName || "Sheet1").slice(0, 31));
     XLSX.writeFile(wb, filename);
-  } catch (e) { console.error(e); alert("Couldn't build the Excel file. Run npm install to add the export libraries, then try again."); }
+  } catch (e) { console.error(e); alert("Couldn't build the Excel file — the export library failed to load. Check your internet connection and try again."); }
 }
 async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
   try {
-    const { default: jsPDF } = await import("jspdf");
-    const autoTable = (await import("jspdf-autotable")).default;
+    const jspdfMod = await import(/* @vite-ignore */ EXPORT_CDN.jspdf);
+    const jsPDF = jspdfMod.jsPDF || jspdfMod.default;
+    const autoTable = (await import(/* @vite-ignore */ EXPORT_CDN.autotable)).default;
     const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
     doc.setFontSize(15); doc.text(title, 40, 40);
     if (subtitle) { doc.setFontSize(10); doc.setTextColor(120); doc.text(subtitle, 40, 58); doc.setTextColor(0); }
@@ -1024,7 +1035,7 @@ async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
       alternateRowStyles: { fillColor: [244, 247, 249] },
     });
     doc.save(filename);
-  } catch (e) { console.error(e); alert("Couldn't build the PDF. Run npm install to add the export libraries, then try again."); }
+  } catch (e) { console.error(e); alert("Couldn't build the PDF — the export library failed to load. Check your internet connection and try again."); }
 }
 
 function AccountFull({ db, user, goBack }) {
