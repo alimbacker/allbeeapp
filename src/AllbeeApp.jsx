@@ -54,10 +54,26 @@ function money(n, { sign = false } = {}) {
   if (sign) return "+" + core;
   return core;
 }
+// Parse a date that might be a Date, a proper ISO string, or a messy imported
+// string (dd/mm/yyyy, mm/dd/yyyy, or even yyyy-dd-mm). When a field is clearly a
+// day (>12) we use it to recover the correct day/month order. Returns a Date or null.
+function parseDate(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  const s = String(v).trim();
+  let m = s.match(/^(\d{4})\D(\d{1,2})\D(\d{1,2})/); // yyyy-?-?
+  if (m) { const y = +m[1]; let mo = +m[2], d = +m[3]; if (mo > 12 && d <= 12) { const t = mo; mo = d; d = t; } const dt = new Date(y, mo - 1, d); return isNaN(dt) ? null : dt; }
+  m = s.match(/^(\d{1,2})\D(\d{1,2})\D(\d{4})/); // ?-?-yyyy
+  if (m) { let a = +m[1], b = +m[2]; const y = +m[3]; let d, mo; if (a > 12) { d = a; mo = b; } else if (b > 12) { d = b; mo = a; } else { d = a; mo = b; } const dt = new Date(y, mo - 1, d); return isNaN(dt) ? null : dt; }
+  const t = Date.parse(s); return isNaN(t) ? null : new Date(t);
+}
+// "YYYY-MM" key + a friendly "Mon YYYY" label, used by the month filter.
+function ymKey(v) { const d = parseDate(v); return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` : null; }
+function ymLabel(key) { const [y, m] = key.split("-"); return new Date(+y, +m - 1, 1).toLocaleDateString("en-IN", { month: "short", year: "numeric" }); }
+
 function fmtDate(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso + (iso.length === 10 ? "T00:00:00" : ""));
-  if (isNaN(d)) return iso;
+  const d = parseDate(iso);
+  if (!d) return iso ? String(iso) : "—";
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 function fmtTime(ts) {
@@ -1121,11 +1137,8 @@ function impISO(v) {
   if (v === "" || v == null) return "";
   if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
   if (typeof v === "number") { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? "" : d.toISOString().slice(0, 10); }
-  const s = String(v).trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
-  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // assume day/month/year (India)
-  if (m) { let [, d, mo, y] = m; if (y.length === 2) y = "20" + y; return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
-  const t = Date.parse(s); return isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
+  const d = parseDate(v); // handles dd/mm, mm/dd and yyyy-?-? using a >12 day heuristic
+  return d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "";
 }
 function impPay(v) { const s = String(v).toLowerCase(); if (s.includes("partial")) return "Partial"; if (s.includes("paid") && !s.includes("un")) return "Paid"; return "Unpaid"; }
 function impStatus(v) { const s = impNorm(v); if (s.includes("complete") || s === "done") return "Completed"; if (s.includes("progress")) return "In Progress"; if (s.includes("accept")) return "Accepted"; return "Created"; }
@@ -1392,12 +1405,28 @@ function AccountFull({ db, user, goBack }) {
 function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
   const [view, setView] = useState("all");
   const [q, setQ] = useState("");
+  const [month, setMonth] = useState("all");
+  const months = useMemo(() => {
+    const set = new Set();
+    for (const t of db.transactions) { const k = ymKey(t.date); if (k) set.add(k); }
+    return Array.from(set).sort().reverse();
+  }, [db.transactions]);
   const list = useMemo(() => {
-    let r = [...db.transactions].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
+    let r = [...db.transactions].sort((a, b) => {
+      const da = parseDate(a.date)?.getTime() || 0, dbb = parseDate(b.date)?.getTime() || 0;
+      return dbb - da || ((b.createdAt || 0) - (a.createdAt || 0));
+    });
     if (view !== "all") r = r.filter((t) => t.kind === view);
+    if (month !== "all") r = r.filter((t) => ymKey(t.date) === month);
     if (q.trim()) { const s = q.toLowerCase(); r = r.filter((t) => [t.client, t.project, t.category, t.notes].join(" ").toLowerCase().includes(s)); }
     return r;
-  }, [db.transactions, view, q]);
+  }, [db.transactions, view, q, month]);
+  const sums = useMemo(() => {
+    let inc = 0, exp = 0;
+    for (const t of list) { if (t.kind === "income") inc += (t.amount || 0); else exp += (t.amount || 0); }
+    return { inc: round2(inc), exp: round2(exp), net: round2(inc - exp) };
+  }, [list]);
+  const filtered = view !== "all" || month !== "all" || q.trim();
 
   const del = (t) => removeItem("transactions", t, { name: `${t.kind === "income" ? "Income" : "Expense"} ${money(t.amount)}${t.client ? " · " + t.client : ""}`, audit: `deleted a ${t.kind} of ${money(t.amount)}` });
 
@@ -1426,7 +1455,23 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
       <div className="toolbar">
         <div className="search"><Search size={16} color="var(--muted)" /><input placeholder="Search client, project, notes…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <div className="seg">{[["all", "All"], ["income", "Income"], ["expense", "Expenses"]].map(([k, l]) => <button key={k} className={view === k ? "on" : ""} onClick={() => setView(k)}>{l}</button>)}</div>
+        <select className="select" value={month} onChange={(e) => setMonth(e.target.value)} style={{ width: "auto" }} aria-label="Filter by month">
+          <option value="all">All months</option>
+          {months.map((m) => <option key={m} value={m}>{ymLabel(m)}</option>)}
+        </select>
+        {filtered && <button className="btn sm ghost" onClick={() => { setView("all"); setMonth("all"); setQ(""); }}><X size={13} />Clear</button>}
       </div>
+
+      {filtered && (
+        <div className="card stat" style={{ marginBottom: 14, display: "flex", flexWrap: "wrap", gap: 18, alignItems: "center" }}>
+          <div><div className="lbl" style={{ fontSize: 11 }}>{month !== "all" ? ymLabel(month) : "Filtered"} · {list.length} {list.length === 1 ? "entry" : "entries"}</div></div>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginLeft: "auto" }}>
+            <div><div className="lbl" style={{ fontSize: 11 }}>Income</div><div className="mono pos-txt" style={{ fontWeight: 700 }}>{money(sums.inc)}</div></div>
+            <div><div className="lbl" style={{ fontSize: 11 }}>Expenses</div><div className="mono neg-txt" style={{ fontWeight: 700 }}>{money(sums.exp)}</div></div>
+            <div><div className="lbl" style={{ fontSize: 11 }}>Net</div><div className="mono" style={{ fontWeight: 700, color: sums.net < 0 ? "var(--neg)" : "var(--pos)" }}>{money(sums.net)}</div></div>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         {list.length === 0 ? (
