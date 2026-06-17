@@ -185,6 +185,7 @@ create policy recycle_del on public.recycle for delete to authenticated
   using (public.is_admin() or (data->>'deletedById') = auth.uid()::text);
 select public._allbee_realtime('recycle');
 
+
 -- ============================================================================
 -- AFTER RUNNING THIS
 --   0. Re-running on an existing database is safe — this script only adds what
