@@ -82,11 +82,21 @@ const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", 
 async function fetchAll() {
   const db = emptyDB();
   await Promise.all(TABLES.map(async (t) => {
-    const { data, error } = await supabase.from(t).select("id,data");
-    if (error) throw new Error(`Loading ${t}: ${error.message}`);
-    db[t] = (data || [])
-      .map((r) => r.data)
-      .sort((a, b) => (a?.createdAt || a?.ts || 0) - (b?.createdAt || b?.ts || 0));
+    try {
+      const { data, error } = await supabase.from(t).select("id,data");
+      if (error) {
+        // Tolerate a table that hasn't been created yet (e.g. a new feature whose
+        // schema migration hasn't been run). It simply loads empty so the rest of
+        // the app still works instead of freezing on the loading screen.
+        console.warn(`[ALLBEE] Skipping "${t}": ${error.message}. Re-run supabase/schema.sql if this is a new feature.`);
+        return;
+      }
+      db[t] = (data || [])
+        .map((r) => r.data)
+        .sort((a, b) => (a?.createdAt || a?.ts || 0) - (b?.createdAt || b?.ts || 0));
+    } catch (e) {
+      console.warn(`[ALLBEE] Skipping "${t}": ${e?.message || e}`);
+    }
   }));
   return db;
 }
