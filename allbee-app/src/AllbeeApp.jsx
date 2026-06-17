@@ -6,6 +6,7 @@ import {
   Download, Upload, LogOut, Hexagon, CalendarClock, ArrowRight, Menu, Wifi, WifiOff,
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
+  ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -16,6 +17,7 @@ import { supabase } from "./supabaseClient";
 ─────────────────────────────────────────────────────────────────────────── */
 
 const USERS = ["Haji", "Alim"];
+const COMBINED = "Haji & Alim";          // a task can be assigned to both partners
 const PRESETS = [[50, 50], [70, 30], [30, 70], [60, 40], [40, 60]];
 
 const TASK_FLOW = ["Created", "Accepted", "In Progress", "Completed"];
@@ -24,6 +26,16 @@ const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 const INCOME_CATEGORIES = ["Project", "Course", "Marketing", "Consulting", "Other"];
 const EXPENSE_CATEGORIES = ["Office Rent", "Internet", "Electricity", "Marketing", "Software", "Travel", "Other"];
 const LEAVE_TYPES = ["Casual", "Sick", "Earned", "Unpaid"];
+
+// Recently Deleted (recycle bin): which collections support soft-delete + restore,
+// the human label shown for each, and how long items survive before auto-cleanup.
+const RECYCLE_TTL_DAYS = 60;
+const MODULE_LABEL = {
+  transactions: "Accounts", withdrawals: "Withdrawals", tasks: "Tasks",
+  projects: "Projects", students: "Courses", marketing: "Marketing", concepts: "Concepts",
+};
+const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
+const LOGO_ICON = "/allbee-icon.png";   // square monogram
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -62,7 +74,7 @@ const sameMonth = (iso, ref = new Date()) => {
    We load every row into the in-memory shape, and on each change we persist
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
-const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates"];
+const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -149,7 +161,7 @@ const emptyDB = () => ({
   version: 2,
   transactions: [], withdrawals: [], tasks: [], projects: [],
   students: [], marketing: [], concepts: [], audit: [],
-  attendance: [], leave: [], updates: [],
+  attendance: [], leave: [], updates: [], recycle: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -177,22 +189,43 @@ function ledgerFor(db, user) {
     const share = round2((a * pct) / 100);
     events.push({
       ts: t.createdAt || 0, date: t.date, client: t.client || "—",
-      project: t.project || t.category || "—",
+      project: t.project || t.category || "—", category: t.category || "—",
       type: t.kind === "income" ? "Income" : "Expense",
       income: t.kind === "income" ? a : null,
       expense: t.kind === "expense" ? a : null,
       pct, credited: t.kind === "income" ? share : 0, debited: t.kind === "expense" ? share : 0,
+      notes: t.notes || "",
     });
   }
   for (const w of db.withdrawals.filter((w) => w.user === user)) {
     events.push({
-      ts: w.createdAt || 0, date: w.date, client: "—", project: "Withdrawal", type: "Withdrawal",
-      income: null, expense: null, pct: 100, credited: 0, debited: Number(w.amount) || 0,
+      ts: w.createdAt || 0, date: w.date, client: "—", project: "Withdrawal", category: "Withdrawal", type: "Withdrawal",
+      income: null, expense: null, pct: 100, credited: 0, debited: Number(w.amount) || 0, notes: w.notes || "",
     });
   }
   events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.ts - b.ts));
   let run = 0;
   return events.map((e) => { run = round2(run + e.credited - e.debited); return { ...e, running: run }; });
+}
+
+// ── task ownership / permissions ──────────────────────────────────────────
+// Who may move a task through its workflow (Accept → Start → Complete → undo):
+// only the assigned person. A task assigned to both partners can be acted on
+// by either Haji or Alim.
+const taskAssignees = (t) => (t.assignedTo === COMBINED ? USERS.slice() : [t.assignedTo]);
+const canActOnTask = (t, name) => taskAssignees(t).includes(name);
+// Who may edit / delete / monitor a task: an admin or the person who created it.
+const canEditTask = (t, name, isAdmin) => isAdmin || t.assignedBy === name;
+// A readable, ordered activity timeline. Falls back to a sensible reconstruction
+// for tasks created before history tracking existed.
+function taskTimeline(t) {
+  if (Array.isArray(t.history) && t.history.length) {
+    return [...t.history].sort((a, b) => (a.at || 0) - (b.at || 0));
+  }
+  const out = [{ status: "Created", at: t.createdAt || 0, by: t.assignedBy }];
+  const idx = TASK_FLOW.indexOf(t.status);
+  for (let i = 1; i <= idx; i++) out.push({ status: TASK_FLOW[i], at: t.createdAt || 0, by: i === 1 ? t.assignedTo : t.assignedTo });
+  return out;
 }
 
 function monthStats(db) {
@@ -427,6 +460,71 @@ table.tbl tr:hover td { background:var(--surface-2); }
   .grid2 { grid-template-columns:1fr; }
   .company-pill .lbl { display:none; }
 }
+
+/* ── Phase 2 additions ─────────────────────────────────────────────────── */
+/* logo */
+.brand-logo { height:30px; width:auto; display:block; }
+.lock-logo { height:64px; width:auto; margin:0 auto 16px; display:block; }
+.brand-mini { display:flex; align-items:center; gap:10px; padding:6px 8px 16px; }
+
+/* back link + detail header */
+.backlink { display:inline-flex; align-items:center; gap:6px; background:none; border:none; color:var(--muted);
+  font-size:13px; font-weight:600; cursor:pointer; padding:4px 0; margin-bottom:6px; }
+.backlink:hover { color:var(--ink); }
+.detail-head { display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+.detail-head h3 { font-size:22px; margin:0; font-weight:800; letter-spacing:-.3px; }
+.meta-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px; background:var(--border);
+  border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+.meta-grid > div { background:var(--surface); padding:12px 14px; }
+.meta-grid .k { font-size:11px; text-transform:uppercase; letter-spacing:.5px; color:var(--muted); font-weight:600; }
+.meta-grid .v { font-weight:600; margin-top:5px; font-size:14px; }
+
+/* summary stat strip */
+.sumrow { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:16px; }
+.sumrow .card { padding:14px 16px; }
+.sumrow .k { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; font-weight:500; }
+.sumrow .v { font-size:21px; font-weight:700; margin-top:7px; letter-spacing:-.4px; }
+
+/* filter bar */
+.filterbar { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; align-items:end; }
+.filterbar .field { margin:0; }
+.filterbar label { font-size:11px; }
+
+/* activity timeline */
+.timeline { position:relative; padding-left:22px; }
+.timeline::before { content:""; position:absolute; left:6px; top:4px; bottom:4px; width:2px; background:var(--border); }
+.tl-item { position:relative; padding:6px 0 14px; }
+.tl-item:last-child { padding-bottom:0; }
+.tl-dot { position:absolute; left:-20px; top:8px; width:11px; height:11px; border-radius:50%; background:var(--primary);
+  border:2px solid var(--surface); box-shadow:0 0 0 1px var(--border); }
+.tl-item .what { font-weight:600; font-size:14px; }
+.tl-item .when { font-size:12px; color:var(--muted); margin-top:2px; }
+
+/* comments */
+.comment { display:flex; gap:10px; padding:12px 0; border-bottom:1px solid var(--border); }
+.comment:last-child { border-bottom:none; }
+.comment .body { flex:1; min-width:0; }
+.comment .who { font-weight:600; font-size:13.5px; }
+.comment .txt { margin-top:3px; line-height:1.5; white-space:pre-wrap; font-size:14px; }
+.comment .when { font-size:11.5px; color:var(--muted); margin-top:4px; }
+.composer { display:flex; gap:10px; align-items:flex-end; margin-top:6px; }
+.composer .textarea { min-height:44px; }
+
+/* attachment chips */
+.attach-list { display:flex; flex-direction:column; gap:8px; }
+.attach { display:flex; align-items:center; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:var(--surface-2); }
+.attach a { color:var(--primary); text-decoration:none; font-weight:600; font-size:14px; word-break:break-all; }
+.attach a:hover { text-decoration:underline; }
+
+/* recently deleted */
+.ttl-pill { font-size:11px; font-weight:600; padding:3px 9px; border-radius:20px; }
+.ttl-ok { background:var(--surface-2); color:var(--muted); }
+.ttl-soon { background:var(--neg-soft); color:var(--neg); }
+.detail-json { background:var(--surface-2); border-radius:10px; padding:12px 14px; font-size:12.5px; line-height:1.7; }
+.detail-json .k { color:var(--muted); }
+.ttl-link { background:none; border:none; padding:0; margin:0; font:inherit; font-weight:700; font-size:14.5px; color:var(--ink);
+  cursor:pointer; text-align:left; }
+.ttl-link:hover { color:var(--primary); text-decoration:underline; }
 `;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -495,6 +593,36 @@ function Confirm({ title, body, confirmLabel = "Delete", onConfirm, onClose, dan
           onClick={() => { onConfirm(); onClose(); }}>{confirmLabel}</button>
       </>}>
       <p style={{ margin: 0, color: "var(--muted)", lineHeight: 1.55 }}>{body}</p>
+    </Modal>
+  );
+}
+
+// Safer destructive action: the button stays disabled until the person types the
+// exact word (CONFIRM). Used for every delete and every restore.
+function TypedConfirm({ title, body, note, word = "CONFIRM", actionLabel = "Delete", icon, danger = true, onConfirm, onClose }) {
+  const [val, setVal] = useState("");
+  const ok = val === word;
+  return (
+    <Modal title={title} onClose={onClose}
+      footer={<>
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={!ok}
+          style={ok && danger ? { background: "var(--neg)", borderColor: "var(--neg)" } : {}}
+          onClick={() => { if (ok) { onConfirm(); onClose(); } }}>
+          {icon}{actionLabel}
+        </button>
+      </>}>
+      {body && <p style={{ margin: 0, color: "var(--muted)", lineHeight: 1.55 }}>{body}</p>}
+      {note && (
+        <div className="calc-box" style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <AlertTriangle size={18} color={danger ? "var(--neg)" : "var(--accent)"} style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: 13, lineHeight: 1.5 }}>{note}</span>
+        </div>
+      )}
+      <Field label={<>Type <b className="mono" style={{ letterSpacing: ".5px" }}>{word}</b> to confirm</>}>
+        <input className="input mono" autoFocus value={val} onChange={(e) => setVal(e.target.value)}
+          placeholder={word} onKeyDown={(e) => { if (e.key === "Enter" && ok) { onConfirm(); onClose(); } }} />
+      </Field>
     </Modal>
   );
 }
@@ -635,6 +763,8 @@ function WithdrawForm({ balances, defaultUser, onSave, onClose }) {
 
 function TaskForm({ initial, onSave, onClose, currentUser, team = USERS, isAdmin = true }) {
   const others = team.filter((n) => n !== currentUser);
+  // Admins choose any teammate, plus a combined "Haji & Alim" option.
+  const assigneeOptions = isAdmin ? [...team, COMBINED] : [currentUser];
   const [f, setF] = useState(() => ({
     title: "", desc: "", assignedBy: currentUser, assignedTo: initial?.assignedTo || (isAdmin ? (others[0] || currentUser) : currentUser),
     priority: "Medium", due: "", notes: "", ...initial,
@@ -647,6 +777,8 @@ function TaskForm({ initial, onSave, onClose, currentUser, team = USERS, isAdmin
       ...initial, id: initial?.id || uid(), title: f.title.trim(), desc: f.desc.trim(),
       assignedBy: f.assignedBy, assignedTo: f.assignedTo, priority: f.priority, due: f.due,
       notes: f.notes.trim(), status: initial?.status || "Created", progress: initial?.progress ?? 0,
+      history: initial?.history || [{ status: "Created", at: Date.now(), by: f.assignedBy }],
+      comments: initial?.comments || [], attachments: initial?.attachments || [],
       createdAt: initial?.createdAt || Date.now(),
     });
     onClose();
@@ -659,9 +791,9 @@ function TaskForm({ initial, onSave, onClose, currentUser, team = USERS, isAdmin
       <Field label="Description"><textarea className="textarea" value={f.desc} onChange={(e) => up("desc", e.target.value)} placeholder="Full, detailed instructions — write as much as you need." /></Field>
       <div className="grid2">
         <Field label="Assigned by"><input className="input" value={f.assignedBy} disabled style={{ opacity: .7 }} /></Field>
-        <Field label="Assigned to">
+        <Field label="Assigned to" hint={f.assignedTo === COMBINED ? "Either partner can accept, start or complete it." : undefined}>
           {isAdmin
-            ? <select className="select" value={f.assignedTo} onChange={(e) => up("assignedTo", e.target.value)}>{team.map((u) => <option key={u}>{u}</option>)}</select>
+            ? <select className="select" value={f.assignedTo} onChange={(e) => up("assignedTo", e.target.value)}>{assigneeOptions.map((u) => <option key={u}>{u}</option>)}</select>
             : <input className="input" value={f.assignedTo} disabled style={{ opacity: .7 }} />}
         </Field>
       </div>
@@ -828,12 +960,15 @@ function Dashboard({ db, bal, go, openBalance }) {
   );
 }
 
-function BalanceDetail({ db, user, onClose }) {
+function BalanceDetail({ db, user, onClose, onFull }) {
   const rows = useMemo(() => ledgerFor(db, user), [db, user]);
   const final = rows.length ? rows[rows.length - 1].running : 0;
   return (
     <Modal title={`${user} — balance breakdown`} onClose={onClose}
-      footer={<button className="btn primary" onClick={onClose}>Close</button>}>
+      footer={<>
+        {onFull && <button className="btn" onClick={() => { onClose(); onFull(user); }}><ExternalLink size={15} />Open full view</button>}
+        <button className="btn primary" onClick={onClose}>Close</button>
+      </>}>
       <div className="calc-box" style={{ marginBottom: 4 }}>
         <div className="calc-row"><span style={{ color: "var(--muted)" }}>Current balance</span>
           <span className="mono" style={{ fontWeight: 800, fontSize: 18, color: final < 0 ? "var(--neg)" : "var(--ink)" }}>{money(final)}</span></div>
@@ -862,7 +997,179 @@ function BalanceDetail({ db, user, onClose }) {
   );
 }
 
-function Accounts({ db, bal, mutate, openModal, openBalance }) {
+/* ── exports (Excel / PDF) ──────────────────────────────────────────────────
+   The export libraries are fetched on demand from a CDN, so they are NOT npm
+   or build dependencies — nothing to install, nothing to bundle, and the app
+   loads fine without them. They're only downloaded the moment you export.
+   (Loaded via a variable URL so the bundler treats them as runtime-external.) */
+const EXPORT_CDN = {
+  xlsx: "https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs",
+  jspdf: "https://esm.sh/jspdf@2.5.2",
+  autotable: "https://esm.sh/jspdf-autotable@3.8.4",
+};
+async function exportRowsToExcel(filename, sheetName, columns, rows) {
+  try {
+    const mod = await import(/* @vite-ignore */ EXPORT_CDN.xlsx);
+    const XLSX = mod.utils ? mod : (mod.default || mod);
+    const aoa = [columns.map((c) => c.label), ...rows.map((r) => columns.map((c) => c.value(r)))];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws["!cols"] = columns.map((c) => ({ wch: c.w || 14 }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, (sheetName || "Sheet1").slice(0, 31));
+    XLSX.writeFile(wb, filename);
+  } catch (e) { console.error(e); alert("Couldn't build the Excel file — the export library failed to load. Check your internet connection and try again."); }
+}
+async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
+  try {
+    const jspdfMod = await import(/* @vite-ignore */ EXPORT_CDN.jspdf);
+    const jsPDF = jspdfMod.jsPDF || jspdfMod.default;
+    const autoTable = (await import(/* @vite-ignore */ EXPORT_CDN.autotable)).default;
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    doc.setFontSize(15); doc.text(title, 40, 40);
+    if (subtitle) { doc.setFontSize(10); doc.setTextColor(120); doc.text(subtitle, 40, 58); doc.setTextColor(0); }
+    autoTable(doc, {
+      head: [columns.map((c) => c.label)],
+      body: rows.map((r) => columns.map((c) => { const v = c.value(r); return v === "" || v == null ? "" : String(v); })),
+      startY: 72, styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [16, 159, 142], textColor: 255 },
+      alternateRowStyles: { fillColor: [244, 247, 249] },
+    });
+    doc.save(filename);
+  } catch (e) { console.error(e); alert("Couldn't build the PDF — the export library failed to load. Check your internet connection and try again."); }
+}
+
+function AccountFull({ db, user, goBack }) {
+  const all = useMemo(() => ledgerFor(db, user), [db, user]);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [client, setClient] = useState("all");
+  const [project, setProject] = useState("all");
+  const [category, setCategory] = useState("all");
+
+  const clients = useMemo(() => Array.from(new Set(all.map((r) => r.client).filter((c) => c && c !== "—"))).sort(), [all]);
+  const projects = useMemo(() => Array.from(new Set(all.map((r) => r.project).filter(Boolean))).sort(), [all]);
+  const categories = useMemo(() => Array.from(new Set(all.map((r) => r.category).filter(Boolean))).sort(), [all]);
+
+  const rows = useMemo(() => all.filter((r) => {
+    if (from && r.date < from) return false;
+    if (to && r.date > to) return false;
+    if (client !== "all" && r.client !== client) return false;
+    if (project !== "all" && r.project !== project) return false;
+    if (category !== "all" && r.category !== category) return false;
+    return true;
+  }), [all, from, to, client, project, category]);
+
+  const filtered = from || to || client !== "all" || project !== "all" || category !== "all";
+  const currentBalance = all.length ? all[all.length - 1].running : 0;
+  const totIncome = round2(rows.filter((r) => r.type === "Income").reduce((s, r) => s + r.credited, 0));
+  const totExpense = round2(rows.filter((r) => r.type === "Expense").reduce((s, r) => s + r.debited, 0));
+  const totWithdraw = round2(rows.filter((r) => r.type === "Withdrawal").reduce((s, r) => s + r.debited, 0));
+  const net = round2(totIncome - totExpense - totWithdraw);
+
+  const columns = [
+    { label: "Date", w: 12, value: (r) => fmtDate(r.date) },
+    { label: "Client", w: 18, value: (r) => r.client },
+    { label: "Project", w: 22, value: (r) => r.project },
+    { label: "Category", w: 14, value: (r) => r.category },
+    { label: "Income (₹)", w: 12, value: (r) => (r.income != null ? round2(r.income) : "") },
+    { label: "Expense (₹)", w: 12, value: (r) => (r.expense != null ? round2(r.expense) : "") },
+    { label: "Share %", w: 9, value: (r) => r.pct },
+    { label: "Credited (₹)", w: 12, value: (r) => (r.credited ? round2(r.credited) : "") },
+    { label: "Debited (₹)", w: 12, value: (r) => (r.debited ? round2(r.debited) : "") },
+    { label: "Running balance (₹)", w: 14, value: (r) => round2(r.running) },
+    { label: "Notes", w: 26, value: (r) => r.notes || "" },
+  ];
+  const sub = `${user} · generated ${fmtDate(todayISO())}${filtered ? " · filtered view" : ""}`;
+  const doExcel = () => exportRowsToExcel(`allbee-${user.toLowerCase()}-account-${todayISO()}.xlsx`, `${user} account`, columns, rows);
+  const doPDF = () => exportRowsToPDF(`allbee-${user.toLowerCase()}-account-${todayISO()}.pdf`, `ALLBEE — ${user} account statement`, sub, columns, rows);
+  const clear = () => { setFrom(""); setTo(""); setClient("all"); setProject("all"); setCategory("all"); };
+
+  const SUMMARY = [
+    ["Current balance", currentBalance, <Wallet size={13} />, true],
+    ["Total income", totIncome, <ArrowRight size={13} />, false],
+    ["Total expenses", totExpense, <ArrowRight size={13} />, false],
+    ["Total withdrawals", totWithdraw, <ArrowDownToLine size={13} />, false],
+    ["Net balance", net, <TrendingUp size={13} />, true],
+  ];
+
+  return (
+    <div className="content">
+      <button className="backlink" onClick={goBack}><ArrowLeft size={15} />Back to Share &amp; accounts</button>
+      <div className="detail-head">
+        <span className="avatar" style={{ background: avatarColor(user), width: 40, height: 40, fontSize: 17 }}>{user[0]}</span>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <h3>{user} — account statement</h3>
+          <div className="topbar-sub">Full balance breakdown for {user}</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button className="btn" onClick={doExcel}><Sheet size={15} />Export Excel</button>
+          <button className="btn" onClick={doPDF}><FileText size={15} />Export PDF</button>
+        </div>
+      </div>
+
+      <div className="sumrow">
+        {SUMMARY.map(([k, v, ic, strong]) => (
+          <div key={k} className="card">
+            <div className="k">{ic} {k}</div>
+            <div className="v mono" style={{ color: strong ? (v < 0 ? "var(--neg)" : "var(--ink)") : (k === "Total income" ? "var(--pos)" : k === "Current balance" || k === "Net balance" ? undefined : "var(--neg)") }}>{money(v)}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="card" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="lbl" style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 700, color: "var(--ink)", marginBottom: 12 }}><Filter size={14} /> Filters</div>
+        <div className="filterbar">
+          <Field label="From date"><input className="input" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+          <Field label="To date"><input className="input" type="date" value={to} min={from || undefined} onChange={(e) => setTo(e.target.value)} /></Field>
+          <Field label="Client"><select className="select" value={client} onChange={(e) => setClient(e.target.value)}><option value="all">All clients</option>{clients.map((c) => <option key={c}>{c}</option>)}</select></Field>
+          <Field label="Project"><select className="select" value={project} onChange={(e) => setProject(e.target.value)}><option value="all">All projects</option>{projects.map((p) => <option key={p}>{p}</option>)}</select></Field>
+          <Field label="Category"><select className="select" value={category} onChange={(e) => setCategory(e.target.value)}><option value="all">All categories</option>{categories.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
+          <span className="hint-line">{rows.length} of {all.length} entries{filtered ? " · totals above reflect these filters" : ""}</span>
+          {filtered && <button className="btn sm ghost" onClick={clear}><X size={13} />Clear filters</button>}
+        </div>
+      </div>
+
+      <div className="card">
+        {rows.length === 0 ? (
+          <Empty icon={<Wallet size={22} color="var(--muted)" />} title={all.length ? "No entries match these filters" : "No movements yet"}
+            text={all.length ? "Try widening the date range or clearing a filter." : "Income, expenses and withdrawals for this partner will appear here."}
+            action={filtered ? <button className="btn" onClick={clear}>Clear filters</button> : undefined} />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl">
+              <thead><tr>
+                <th>Date</th><th>Client</th><th>Project</th><th>Category</th>
+                <th className="num-cell">Income</th><th className="num-cell">Expense</th><th>Share %</th>
+                <th className="num-cell">Credited</th><th className="num-cell">Debited</th><th className="num-cell">Running</th><th>Notes</th>
+              </tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td className="mono" style={{ whiteSpace: "nowrap" }}>{fmtDate(r.date)}</td>
+                    <td>{r.client}</td>
+                    <td style={{ fontWeight: 600 }}>{r.project}</td>
+                    <td><span className="tag">{r.category}</span></td>
+                    <td className="num-cell mono pos-txt">{r.income != null ? money(r.income) : "—"}</td>
+                    <td className="num-cell mono neg-txt">{r.expense != null ? money(r.expense) : "—"}</td>
+                    <td className="mono">{r.pct}%</td>
+                    <td className="num-cell mono pos-txt">{r.credited ? money(r.credited) : "—"}</td>
+                    <td className="num-cell mono neg-txt">{r.debited ? money(r.debited) : "—"}</td>
+                    <td className="num-cell mono" style={{ fontWeight: 700, color: r.running < 0 ? "var(--neg)" : "var(--ink)" }}>{money(r.running)}</td>
+                    <td style={{ color: "var(--muted)", fontSize: 13, maxWidth: 220 }}>{r.notes || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
   const [view, setView] = useState("all");
   const [q, setQ] = useState("");
   const list = useMemo(() => {
@@ -872,7 +1179,7 @@ function Accounts({ db, bal, mutate, openModal, openBalance }) {
     return r;
   }, [db.transactions, view, q]);
 
-  const del = (t) => mutate((d) => ({ ...d, transactions: d.transactions.filter((x) => x.id !== t.id) }), { action: `deleted a ${t.kind} of ${money(t.amount)}`, module: "Accounts" });
+  const del = (t) => removeItem("transactions", t, { name: `${t.kind === "income" ? "Income" : "Expense"} ${money(t.amount)}${t.client ? " · " + t.client : ""}`, audit: `deleted a ${t.kind} of ${money(t.amount)}` });
 
   return (
     <div className="content">
@@ -918,7 +1225,7 @@ function Accounts({ db, bal, mutate, openModal, openBalance }) {
                     <td style={{ minWidth: 130 }}><SplitBar h={t.hajiPct} a={t.alimPct} legend={false} /><div className="split-legend"><span>H {t.hajiPct}%</span><span>A {t.alimPct}%</span></div></td>
                     <td><div className="row-actions">
                       <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: t.kind, initial: t })}><Pencil size={14} /></button>
-                      <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "confirm", title: "Delete entry?", body: `Remove this ${t.kind} of ${money(t.amount)}? Balances will recalculate.`, onConfirm: () => del(t) })}><Trash2 size={14} /></button>
+                      <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete entry?", body: `Remove this ${t.kind} of ${money(t.amount)}? Balances will recalculate.`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(t) })}><Trash2 size={14} /></button>
                     </div></td>
                   </tr>
                 ))}
@@ -931,9 +1238,9 @@ function Accounts({ db, bal, mutate, openModal, openBalance }) {
   );
 }
 
-function Withdrawals({ db, bal, mutate, openModal }) {
+function Withdrawals({ db, bal, mutate, openModal, removeItem }) {
   const list = [...db.withdrawals].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
-  const del = (w) => mutate((d) => ({ ...d, withdrawals: d.withdrawals.filter((x) => x.id !== w.id) }), { action: `deleted a withdrawal of ${money(w.amount)}`, module: "Withdrawals" });
+  const del = (w) => removeItem("withdrawals", w, { name: `Withdrawal ${money(w.amount)} · ${w.user}`, audit: `deleted a withdrawal of ${money(w.amount)}` });
   return (
     <div className="content">
       <div className="page-head"><h3>Withdrawals</h3><span className="spacer" />
@@ -960,7 +1267,7 @@ function Withdrawals({ db, bal, mutate, openModal }) {
                   <td><span className="badge" style={{ background: "var(--surface-2)" }}><span className="dot" style={{ background: avatarColor(w.user), display: "inline-block", marginRight: 5 }} />{w.user}</span></td>
                   <td className="num-cell mono neg-txt" style={{ fontWeight: 700 }}>{money(-w.amount)}</td>
                   <td style={{ color: "var(--muted)", fontSize: 13 }}>{w.notes || "—"}</td>
-                  <td><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "confirm", title: "Delete withdrawal?", body: `Remove this ${money(w.amount)} withdrawal for ${w.user}?`, onConfirm: () => del(w) })}><Trash2 size={14} /></button></td>
+                  <td><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete withdrawal?", body: `Remove this ${money(w.amount)} withdrawal for ${w.user}?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(w) })}><Trash2 size={14} /></button></td>
                 </tr>
               ))}</tbody>
             </table>
@@ -973,25 +1280,37 @@ function Withdrawals({ db, bal, mutate, openModal }) {
 
 function priorityTone(p) { return p === "Urgent" || p === "High" ? "neg" : p === "Medium" ? "pri" : ""; }
 
-function Tasks({ db, mutate, openModal, isAdmin = true, currentUser }) {
+function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, removeItem }) {
   const [filter, setFilter] = useState("active");
   const [scope, setScope] = useState("mine"); // staff: mine | assigned
   const list = useMemo(() => {
     let r = [...db.tasks].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : t.assignedTo === currentUser);
+    if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : (t.assignedTo === currentUser || t.assignedTo === COMBINED));
     if (filter === "active") r = r.filter((t) => t.status !== "Completed");
     else if (filter === "done") r = r.filter((t) => t.status === "Completed");
     return r;
   }, [db.tasks, filter, scope, isAdmin, currentUser]);
 
   const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
+
+  // advance is only ever called by the assigned person (button is gated below)
   const advance = (t) => {
     const i = TASK_FLOW.indexOf(t.status); const next = TASK_FLOW[Math.min(i + 1, TASK_FLOW.length - 1)];
     const progress = next === "Completed" ? 100 : next === "In Progress" ? Math.max(t.progress || 0, 25) : t.progress || 0;
-    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: next, progress } : x) }), auditFor(`moved "${t.title}" to ${next}`));
+    const history = [...(t.history || []), { status: next, at: Date.now(), by: currentUser }];
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: next, progress, history } : x) }), auditFor(`moved "${t.title}" to ${next}`));
   };
-  const del = (t) => mutate((d) => ({ ...d, tasks: d.tasks.filter((x) => x.id !== t.id) }), auditFor(`deleted task "${t.title}"`));
-  const canEdit = (t) => isAdmin || t.assignedBy === currentUser;
+  const undo = (t) => {
+    const history = [...(t.history || []), { status: "In Progress", at: Date.now(), by: currentUser }];
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: "In Progress", progress: Math.min(t.progress ?? 90, 90), history } : x) }),
+      auditFor(`restored task "${t.title}" from Completed to In Progress`));
+  };
+  const askDelete = (t) => openModal({
+    type: "deleteConfirm", title: "Delete task?",
+    body: `This moves "${t.title}" to Recently deleted.`, note: "You can restore it within 60 days.",
+    onConfirm: () => removeItem("tasks", t, { name: t.title, audit: `deleted task "${t.title}"` }),
+  });
+  const actLabel = (s) => (s === "Created" ? "Accept" : s === "Accepted" ? "Start" : "Complete");
 
   return (
     <div className="content">
@@ -1007,37 +1326,45 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser }) {
           <Empty icon={<ListTodo size={22} color="var(--muted)" />} title="No tasks here"
             text={isAdmin ? "Assign work to anyone on the team. Tasks move Created → Accepted → In Progress → Completed." : "Tasks assigned to you will appear here. Accept one to get started."}
             action={<button className="btn primary" onClick={() => openModal({ type: "task" })}><Plus size={16} />New task</button>} />
-        ) : list.map((t) => (
-          <div key={t.id} className="item-row">
-            <div className="item-main">
-              <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-                <span className="item-title">{t.title}</span>
-                <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
-                {t.priority && <span className={"badge " + priorityTone(t.priority)}>{t.priority}</span>}
+        ) : list.map((t) => {
+          const canAct = canActOnTask(t, currentUser);
+          const canEdit = canEditTask(t, currentUser, isAdmin);
+          return (
+            <div key={t.id} className="item-row">
+              <div className="item-main">
+                <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  <button className="ttl-link" onClick={() => openTask(t.id)}>{t.title}</button>
+                  <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
+                  {t.priority && <span className={"badge " + priorityTone(t.priority)}>{t.priority}</span>}
+                </div>
+                {t.desc && <div className="item-meta" style={{ marginTop: 6 }}>{t.desc.length > 140 ? t.desc.slice(0, 140) + "…" : t.desc}</div>}
+                <div className="item-meta" style={{ marginTop: 6 }}>
+                  <span>{t.assignedBy} → <b style={{ color: t.assignedTo === COMBINED ? "var(--ink)" : avatarColor(t.assignedTo) }}>{t.assignedTo}</b></span>
+                  {t.due && <span><CalendarClock size={12} style={{ verticalAlign: -2 }} /> {fmtDate(t.due)}</span>}
+                  {!canAct && t.status !== "Completed" && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><ShieldCheck size={11} />{isAdmin ? "Monitor only — " : ""}{t.assignedTo} controls status</span>}
+                </div>
               </div>
-              {t.desc && <div className="item-meta" style={{ marginTop: 6 }}>{t.desc.length > 140 ? t.desc.slice(0, 140) + "…" : t.desc}</div>}
-              <div className="item-meta" style={{ marginTop: 6 }}>
-                <span>{t.assignedBy} → <b style={{ color: avatarColor(t.assignedTo) }}>{t.assignedTo}</b></span>
-                {t.due && <span><CalendarClock size={12} style={{ verticalAlign: -2 }} /> {fmtDate(t.due)}</span>}
+              <div className="row-actions">
+                {canAct && t.status !== "Completed" && <button className="btn sm primary" onClick={() => advance(t)}>{actLabel(t.status)}<ArrowRight size={13} /></button>}
+                {t.status === "Completed" && (canAct || canEdit) && <button className="btn sm" onClick={() => undo(t)}><Undo2 size={13} />Undo</button>}
+                <button className="iconbtn" style={{ width: 32, height: 32 }} title="Open task" onClick={() => openTask(t.id)}><ExternalLink size={14} /></button>
+                {canEdit && <button className="iconbtn" style={{ width: 32, height: 32 }} title="Edit" onClick={() => openModal({ type: "task", initial: t })}><Pencil size={14} /></button>}
+                {canEdit && <button className="iconbtn" style={{ width: 32, height: 32 }} title="Delete" onClick={() => askDelete(t)}><Trash2 size={14} /></button>}
               </div>
             </div>
-            <div className="row-actions">
-              {t.status !== "Completed" && <button className="btn sm primary" onClick={() => advance(t)}>{t.status === "Created" ? "Accept" : t.status === "Accepted" ? "Start" : "Complete"}<ArrowRight size={13} /></button>}
-              {canEdit(t) && <button className="iconbtn" style={{ width: 32, height: 32 }} onClick={() => openModal({ type: "task", initial: t })}><Pencil size={14} /></button>}
-              {canEdit(t) && <button className="iconbtn" style={{ width: 32, height: 32 }} onClick={() => openModal({ type: "confirm", title: "Delete task?", body: `Delete "${t.title}"?`, onConfirm: () => del(t) })}><Trash2 size={14} /></button>}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function Progress({ db, mutate }) {
+function Progress({ db, mutate, isAdmin = true, currentUser, openTask }) {
   const list = db.tasks.filter((t) => t.status === "In Progress");
   const setProgress = (t, v) => {
     const done = v >= 100;
-    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, progress: v, status: done ? "Completed" : "In Progress" } : x) }), done ? { action: `completed "${t.title}"`, module: "Progress" } : null);
+    const history = done ? [...(t.history || []), { status: "Completed", at: Date.now(), by: currentUser }] : (t.history || []);
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, progress: v, status: done ? "Completed" : "In Progress", history } : x) }), done && isAdmin ? { action: `completed "${t.title}"`, module: "Progress" } : null);
   };
   return (
     <div className="content">
@@ -1045,26 +1372,256 @@ function Progress({ db, mutate }) {
       <div className="card">
         {list.length === 0 ? (
           <Empty icon={<TrendingUp size={22} color="var(--muted)" />} title="No tasks in progress" text="Accepted tasks you start working on show up here with a completion slider. Finished tasks move to Completed automatically." />
-        ) : list.map((t) => (
-          <div key={t.id} className="item-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <div className="item-main"><div className="item-title">{t.title}</div>
-                <div className="item-meta"><span style={{ color: avatarColor(t.assignedTo) }}>{t.assignedTo}</span>{t.due && <span>Due {fmtDate(t.due)}</span>}<span className={"badge " + priorityTone(t.priority)}>{t.priority}</span></div></div>
-              <div className="mono" style={{ fontWeight: 700, fontSize: 18 }}>{t.progress || 0}%</div>
+        ) : list.map((t) => {
+          const canAct = canActOnTask(t, currentUser);
+          return (
+            <div key={t.id} className="item-row" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div className="item-main">
+                  {openTask ? <button className="ttl-link" onClick={() => openTask(t.id)}>{t.title}</button> : <div className="item-title">{t.title}</div>}
+                  <div className="item-meta"><span style={{ color: t.assignedTo === COMBINED ? "var(--ink)" : avatarColor(t.assignedTo) }}>{t.assignedTo}</span>{t.due && <span>Due {fmtDate(t.due)}</span>}<span className={"badge " + priorityTone(t.priority)}>{t.priority}</span></div></div>
+                <div className="mono" style={{ fontWeight: 700, fontSize: 18 }}>{t.progress || 0}%</div>
+              </div>
+              <div className="progress-track"><div className="progress-fill" style={{ width: `${t.progress || 0}%` }} /></div>
+              {canAct
+                ? <input type="range" min="0" max="100" step="5" value={t.progress || 0} onChange={(e) => setProgress(t, Number(e.target.value))} style={{ accentColor: "var(--primary)" }} />
+                : <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 5 }}><ShieldCheck size={12} />Monitoring {t.assignedTo}'s progress — only they can update it</div>}
             </div>
-            <div className="progress-track"><div className="progress-fill" style={{ width: `${t.progress || 0}%` }} /></div>
-            <input type="range" min="0" max="100" step="5" value={t.progress || 0} onChange={(e) => setProgress(t, Number(e.target.value))} style={{ accentColor: "var(--primary)" }} />
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 }
 
-function Projects({ db, mutate, openModal, openIncome }) {
+function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, removeItem, goBack }) {
+  const t = db.tasks.find((x) => x.id === taskId);
+  const [comment, setComment] = useState("");
+  const [atLabel, setAtLabel] = useState("");
+  const [atUrl, setAtUrl] = useState("");
+
+  if (!t) {
+    return (
+      <div className="content">
+        <button className="backlink" onClick={goBack}><ArrowLeft size={15} />Back to tasks</button>
+        <div className="card"><Empty icon={<ListTodo size={22} color="var(--muted)" />} title="Task not found" text="This task may have been deleted. Check Recently deleted to restore it." /></div>
+      </div>
+    );
+  }
+
+  const canAct = canActOnTask(t, currentUser);
+  const canEdit = canEditTask(t, currentUser, isAdmin);
+  const canCollaborate = canAct || canEdit;
+  const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
+
+  const advance = () => {
+    const i = TASK_FLOW.indexOf(t.status); const next = TASK_FLOW[Math.min(i + 1, TASK_FLOW.length - 1)];
+    const progress = next === "Completed" ? 100 : next === "In Progress" ? Math.max(t.progress || 0, 25) : t.progress || 0;
+    const history = [...(t.history || []), { status: next, at: Date.now(), by: currentUser }];
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: next, progress, history } : x) }), auditFor(`moved "${t.title}" to ${next}`));
+  };
+  const undo = () => {
+    const history = [...(t.history || []), { status: "In Progress", at: Date.now(), by: currentUser }];
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: "In Progress", progress: Math.min(t.progress ?? 90, 90), history } : x) }),
+      auditFor(`restored task "${t.title}" from Completed to In Progress`));
+  };
+  const addComment = () => {
+    const text = comment.trim(); if (!text) return;
+    const c = { id: uid(), by: currentUser, text, at: Date.now() };
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, comments: [...(x.comments || []), c] } : x) }), null);
+    setComment("");
+  };
+  const addAttachment = () => {
+    const url = atUrl.trim(); if (!url) return;
+    const a = { id: uid(), label: atLabel.trim() || url, url, by: currentUser, at: Date.now() };
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, attachments: [...(x.attachments || []), a] } : x) }), null);
+    setAtLabel(""); setAtUrl("");
+  };
+  const removeAttachment = (id) => mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, attachments: (x.attachments || []).filter((a) => a.id !== id) } : x) }), null);
+  const askDelete = () => openModal({
+    type: "deleteConfirm", title: "Delete task?", body: `This moves "${t.title}" to Recently deleted.`, note: "You can restore it within 60 days.",
+    onConfirm: () => { removeItem("tasks", t, { name: t.title, audit: `deleted task "${t.title}"` }); goBack(); },
+  });
+
+  const timeline = taskTimeline(t);
+  const actLabel = t.status === "Created" ? "Accept" : t.status === "Accepted" ? "Start" : "Complete";
+  const lbl = { display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 700, color: "var(--ink)", marginBottom: 12 };
+  const colorFor = (n) => (n === COMBINED ? "var(--ink)" : avatarColor(n));
+  const META = [
+    ["Assigned by", <span style={{ color: colorFor(t.assignedBy), fontWeight: 600 }}>{t.assignedBy}</span>],
+    ["Assigned to", <span style={{ color: colorFor(t.assignedTo), fontWeight: 600 }}>{t.assignedTo}</span>],
+    ["Due date", t.due ? fmtDate(t.due) : "—"],
+    ["Priority", t.priority || "—"],
+    ["Status", t.status],
+    ["Created", t.createdAt ? fmtTime(t.createdAt) : "—"],
+  ];
+
+  return (
+    <div className="content">
+      <button className="backlink" onClick={goBack}><ArrowLeft size={15} />Back to tasks</button>
+      <div className="detail-head">
+        <div style={{ flex: 1, minWidth: 220 }}>
+          <h3>{t.title}</h3>
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
+            {t.priority && <span className={"badge " + priorityTone(t.priority)}>{t.priority}</span>}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {canAct && t.status !== "Completed" && <button className="btn primary" onClick={advance}>{actLabel}<ArrowRight size={14} /></button>}
+          {t.status === "Completed" && canCollaborate && <button className="btn" onClick={undo}><Undo2 size={15} />Undo</button>}
+          {canEdit && <button className="btn" onClick={() => openModal({ type: "task", initial: t })}><Pencil size={14} />Edit</button>}
+          {canEdit && <button className="btn danger" onClick={askDelete}><Trash2 size={14} />Delete</button>}
+        </div>
+      </div>
+
+      {!canAct && t.status !== "Completed" && (
+        <div className="hint-line" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 5 }}>
+          <ShieldCheck size={12} />{isAdmin ? "You can monitor and edit this task, but " : ""}only {t.assignedTo} can accept, start or complete it.
+        </div>
+      )}
+
+      <div className="meta-grid">
+        {META.map(([k, v]) => <div key={k}><div className="k">{k}</div><div className="v">{v}</div></div>)}
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={lbl}><FileText size={14} /> Description</div>
+        <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{t.desc ? t.desc : <span className="hint-line">No description provided.</span>}</div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={lbl}><Activity size={14} /> Activity timeline</div>
+        <div className="timeline">
+          {timeline.map((ev, i) => (
+            <div key={i} className="tl-item">
+              <span className="tl-dot" />
+              <div className="what">{ev.status}{ev.by ? <span style={{ fontWeight: 400, color: "var(--muted)" }}> · {ev.by}</span> : null}</div>
+              <div className="when">{ev.at ? fmtTime(ev.at) : "—"}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={lbl}><Paperclip size={14} /> Attachments</div>
+        {(t.attachments || []).length > 0 && (
+          <div className="attach-list" style={{ marginBottom: canCollaborate ? 12 : 0 }}>
+            {t.attachments.map((a) => (
+              <div key={a.id} className="attach">
+                <Link2 size={15} color="var(--muted)" />
+                <a href={a.url} target="_blank" rel="noreferrer">{a.label}</a>
+                <span style={{ flex: 1 }} />
+                <a href={a.url} target="_blank" rel="noreferrer" className="iconbtn" style={{ width: 28, height: 28 }} title="Open"><ExternalLink size={13} /></a>
+                {canCollaborate && <button className="iconbtn" style={{ width: 28, height: 28 }} title="Remove" onClick={() => removeAttachment(a.id)}><X size={13} /></button>}
+              </div>
+            ))}
+          </div>
+        )}
+        {(t.attachments || []).length === 0 && <div className="hint-line" style={{ marginBottom: canCollaborate ? 12 : 0 }}>No attachments yet.</div>}
+        {canCollaborate && (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr auto", gap: 8 }}>
+              <input className="input" placeholder="Label (optional)" value={atLabel} onChange={(e) => setAtLabel(e.target.value)} />
+              <input className="input" placeholder="https://link-to-file" value={atUrl} onChange={(e) => setAtUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addAttachment()} />
+              <button className="btn" onClick={addAttachment}><Plus size={15} />Add link</button>
+            </div>
+            <div className="hint-line" style={{ marginTop: 10 }}>Attach links to files (Drive, Dropbox, etc). Direct uploads can be enabled with Supabase Storage — see README.</div>
+          </>
+        )}
+      </div>
+
+      <div className="card" style={{ marginTop: 16, marginBottom: 8 }}>
+        <div style={lbl}><MessageSquare size={14} /> Comments</div>
+        {(t.comments || []).length === 0 && <div className="hint-line">No comments yet.</div>}
+        {(t.comments || []).map((c) => (
+          <div key={c.id} className="comment">
+            <div className="avatar" style={{ background: avatarColor(c.by), width: 30, height: 30, fontSize: 12 }}>{(c.by || "?")[0]}</div>
+            <div className="body">
+              <div className="who">{c.by}</div>
+              <div className="txt">{c.text}</div>
+              <div className="when">{fmtTime(c.at)}</div>
+            </div>
+          </div>
+        ))}
+        {canCollaborate && (
+          <div className="composer">
+            <textarea className="textarea" placeholder="Write a comment…" value={comment} onChange={(e) => setComment(e.target.value)} />
+            <button className="btn primary" onClick={addComment} disabled={!comment.trim()}><Send size={15} />Post</button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function RecentlyDeleted({ db, openModal, restoreItem }) {
+  const [open, setOpen] = useState({});
+  const list = useMemo(() => [...(db.recycle || [])].sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0)), [db.recycle]);
+  const daysLeft = (r) => Math.max(0, RECYCLE_TTL_DAYS - Math.floor((Date.now() - (r.deletedAt || 0)) / 86400000));
+  const askRestore = (r) => openModal({
+    type: "restoreConfirm", title: "Restore item?",
+    body: `Restore ${r.module.toLowerCase()} "${r.name}" to its original module?`, note: "It will reappear where it was before.",
+    onConfirm: () => restoreItem(r),
+  });
+  const detailsOf = (r) => {
+    const it = r.item || {};
+    const skip = new Set(["id", "createdAt", "history", "comments", "attachments"]);
+    return Object.entries(it).filter(([k, v]) => !skip.has(k) && v !== "" && v != null && typeof v !== "object").slice(0, 10);
+  };
+
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Recently deleted</h3></div>
+      <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+        <AlertTriangle size={13} /> Deleted items are kept here for {RECYCLE_TTL_DAYS} days, then removed automatically. There is no permanent-delete option.
+      </div>
+      <div className="card">
+        {list.length === 0 ? (
+          <Empty icon={<Trash2 size={22} color="var(--muted)" />} title="Nothing deleted" text="When you delete a task, project, entry or any other record, it lands here first so you can restore it." />
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl">
+              <thead><tr><th>Item</th><th>Module</th><th>Deleted by</th><th>Deleted</th><th>Auto-removes in</th><th></th></tr></thead>
+              <tbody>
+                {list.map((r) => {
+                  const left = daysLeft(r);
+                  const rows = detailsOf(r);
+                  return (
+                    <React.Fragment key={r.id}>
+                      <tr>
+                        <td><div style={{ fontWeight: 600 }}>{r.name}</div>
+                          {rows.length > 0 && <button className="ttl-link" style={{ fontSize: 12, fontWeight: 500, marginTop: 3 }} onClick={() => setOpen((o) => ({ ...o, [r.id]: !o[r.id] }))}>{open[r.id] ? "Hide" : "View"} original details</button>}
+                        </td>
+                        <td><span className="tag">{r.module}</span></td>
+                        <td><span className="badge"><span className="dot" style={{ background: avatarColor(r.deletedBy), display: "inline-block", marginRight: 5 }} />{r.deletedBy}</span></td>
+                        <td className="mono" style={{ whiteSpace: "nowrap" }}>{fmtTime(r.deletedAt)}</td>
+                        <td><span className={"ttl-pill " + (left <= 7 ? "ttl-soon" : "ttl-ok")}>{left} {left === 1 ? "day" : "days"}</span></td>
+                        <td><button className="btn sm primary" onClick={() => askRestore(r)}><RotateCcw size={13} />Restore</button></td>
+                      </tr>
+                      {open[r.id] && rows.length > 0 && (
+                        <tr><td colSpan={6} style={{ background: "var(--surface-2)" }}>
+                          <div className="detail-json">
+                            {rows.map(([k, v]) => <div key={k}><span className="k">{k}:</span> {String(v)}</div>)}
+                          </div>
+                        </td></tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Projects({ db, mutate, openModal, openIncome, removeItem }) {
   const list = [...db.projects].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const setStage = (p, stage) => mutate((d) => ({ ...d, projects: d.projects.map((x) => x.id === p.id ? { ...x, stage } : x) }), { action: `set "${p.name}" to ${stage}`, module: "Projects" });
-  const del = (p) => mutate((d) => ({ ...d, projects: d.projects.filter((x) => x.id !== p.id) }), { action: `deleted project "${p.name}"`, module: "Projects" });
+  const del = (p) => removeItem("projects", p, { name: p.name, audit: `deleted project "${p.name}"` });
   return (
     <div className="content">
       <div className="page-head"><h3>Projects</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "project" })}><Plus size={16} />New project</button></div>
@@ -1081,7 +1638,7 @@ function Projects({ db, mutate, openModal, openIncome }) {
               <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                 <button className="btn sm primary" onClick={() => openIncome({ client: p.client, project: p.name, amount: p.cost, category: "Project" })}>Record income</button>
                 <button className="btn sm" onClick={() => openModal({ type: "project", initial: p })}><Pencil size={13} /></button>
-                <button className="btn sm danger" onClick={() => openModal({ type: "confirm", title: "Delete project?", body: `Delete "${p.name}"?`, onConfirm: () => del(p) })}><Trash2 size={13} /></button>
+                <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete project?", body: `Delete "${p.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>
               </div>
             </div>
           ))}
@@ -1090,9 +1647,9 @@ function Projects({ db, mutate, openModal, openIncome }) {
   );
 }
 
-function Courses({ db, mutate, openModal, openIncome }) {
+function Courses({ db, mutate, openModal, openIncome, removeItem }) {
   const list = [...db.students].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const del = (s) => mutate((d) => ({ ...d, students: d.students.filter((x) => x.id !== s.id) }), { action: `removed student ${s.name}`, module: "Courses" });
+  const del = (s) => removeItem("students", s, { name: s.name, audit: `removed student ${s.name}` });
   return (
     <div className="content">
       <div className="page-head"><h3>Courses & students</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "student" })}><Plus size={16} />New student</button></div>
@@ -1109,7 +1666,7 @@ function Courses({ db, mutate, openModal, openIncome }) {
                 <td><div className="row-actions">
                   <button className="btn sm primary" onClick={() => openIncome({ client: s.name, project: s.course || "Course fee", amount: s.fee, category: "Course", source: { kind: "student", id: s.id } })}>Record fee</button>
                   <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "student", initial: s })}><Pencil size={14} /></button>
-                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "confirm", title: "Remove student?", body: `Remove ${s.name}?`, onConfirm: () => del(s) })}><Trash2 size={14} /></button>
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Remove student?", body: `Remove ${s.name}?`, note: "They move to Recently deleted — restore within 60 days.", onConfirm: () => del(s) })}><Trash2 size={14} /></button>
                 </div></td>
               </tr>
             ))}</tbody>
@@ -1119,9 +1676,9 @@ function Courses({ db, mutate, openModal, openIncome }) {
   );
 }
 
-function Marketing({ db, mutate, openModal, openIncome }) {
+function Marketing({ db, mutate, openModal, openIncome, removeItem }) {
   const list = [...db.marketing].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const del = (m) => mutate((d) => ({ ...d, marketing: d.marketing.filter((x) => x.id !== m.id) }), { action: `removed marketing client ${m.client}`, module: "Marketing" });
+  const del = (m) => removeItem("marketing", m, { name: m.client, audit: `removed marketing client ${m.client}` });
   return (
     <div className="content">
       <div className="page-head"><h3>Digital marketing</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "marketing" })}><Plus size={16} />New client</button></div>
@@ -1139,7 +1696,7 @@ function Marketing({ db, mutate, openModal, openIncome }) {
                 <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                   <button className="btn sm primary" onClick={() => openIncome({ client: m.client, project: (m.plan || "Marketing") + " — monthly", amount: m.monthlyFee, category: "Marketing", source: { kind: "marketing", id: m.id } })}>Record payment</button>
                   <button className="btn sm" onClick={() => openModal({ type: "marketing", initial: m })}><Pencil size={13} /></button>
-                  <button className="btn sm danger" onClick={() => openModal({ type: "confirm", title: "Remove client?", body: `Remove ${m.client}?`, onConfirm: () => del(m) })}><Trash2 size={13} /></button>
+                  <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Remove client?", body: `Remove ${m.client}?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(m) })}><Trash2 size={13} /></button>
                 </div>
               </div>
             );
@@ -1149,9 +1706,9 @@ function Marketing({ db, mutate, openModal, openIncome }) {
   );
 }
 
-function Concepts({ db, mutate, openModal }) {
+function Concepts({ db, mutate, openModal, removeItem }) {
   const list = [...db.concepts].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const del = (c) => mutate((d) => ({ ...d, concepts: d.concepts.filter((x) => x.id !== c.id) }), { action: `deleted idea "${c.title}"`, module: "Concepts" });
+  const del = (c) => removeItem("concepts", c, { name: c.title, audit: `deleted idea "${c.title}"` });
   const convert = (c) => openModal({ type: "task", initial: { title: c.title, desc: c.notes }, fromConcept: c.id });
   return (
     <div className="content">
@@ -1167,7 +1724,7 @@ function Concepts({ db, mutate, openModal }) {
               <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                 <button className="btn sm primary" onClick={() => convert(c)}><ArrowRight size={13} />Convert to task</button>
                 <button className="btn sm" onClick={() => openModal({ type: "concept", initial: c })}><Pencil size={13} /></button>
-                <button className="btn sm danger" onClick={() => openModal({ type: "confirm", title: "Delete idea?", body: `Delete "${c.title}"?`, onConfirm: () => del(c) })}><Trash2 size={13} /></button>
+                <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete idea?", body: `Delete "${c.title}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(c) })}><Trash2 size={13} /></button>
               </div>
             </div>
           ))}
@@ -1624,9 +2181,25 @@ const NAV = [
   ["marketing", "Marketing", Megaphone, "admin"],
   ["concepts", "Concepts", Lightbulb, "admin"],
   ["progress", "Progress", TrendingUp, "admin"],
+  ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
   ["settings", "Settings", SettingsIcon, "admin"],
 ];
+
+// Parse the URL hash into a view. Supports deep links like #/accounts/haji,
+// #/tasks/<id> and #/recently-deleted, plus #/<navkey> for ordinary pages.
+function parseHash(hash) {
+  const h = (hash || "").replace(/^#\/?/, "").trim();
+  if (!h) return { route: "dashboard", account: null, task: null };
+  const parts = h.split("/");
+  if (parts[0] === "accounts" && parts[1]) {
+    const k = parts[1].toLowerCase();
+    return { route: "accounts", account: k === "haji" ? "Haji" : k === "alim" ? "Alim" : null, task: null };
+  }
+  if (parts[0] === "tasks" && parts[1]) return { route: "tasks", account: null, task: decodeURIComponent(parts[1]) };
+  if (parts[0] === "recently-deleted") return { route: "recently-deleted", account: null, task: null };
+  return { route: parts[0], account: null, task: null };
+}
 
 function Lock({ isDark, setDark }) {
   const [mode, setMode] = useState("signin"); // signin | signup
@@ -1668,8 +2241,7 @@ function Lock({ isDark, setDark }) {
     <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
       <style>{CSS}</style>
       <div className="lock-card">
-        <div className="lock-badge"><Hexagon size={30} fill="#fff" /></div>
-        <h1>ALLBEE</h1>
+        <img className="lock-logo" src={LOGO_FULL} alt="ALLBEE Solutions" />
         <p>{mode === "signin" ? "Sign in to your workspace" : "Create your account"}</p>
 
         {mode === "signup" && (
@@ -1741,7 +2313,7 @@ function NamePicker({ isDark, onChoose }) {
     <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
       <style>{CSS}</style>
       <div className="lock-card">
-        <div className="lock-badge"><Hexagon size={30} fill="#fff" /></div>
+        <img className="lock-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 56 }} />
         <h1>One quick thing</h1>
         <p>Which partner is this account?</p>
         <div className="who-grid">
@@ -1770,6 +2342,8 @@ export default function App() {
   const [userMenu, setUserMenu] = useState(false);
   const [modal, setModal] = useState(null); // {type, ...}
   const [balanceUser, setBalanceUser] = useState(null);
+  const [accountUser, setAccountUser] = useState(null);   // full-page partner statement (Haji/Alim)
+  const [taskDetailId, setTaskDetailId] = useState(null); // full-page task detail
 
   const currentUser = profile?.name || null;
   const isAdmin = profile?.role === "admin";
@@ -1831,6 +2405,56 @@ export default function App() {
     });
   }, [currentUser]);
 
+  // ── soft delete (recycle bin) ─────────────────────────────────────────
+  // Move a row out of its table and into `recycle` instead of destroying it.
+  // Original screens need no change — the row simply disappears from their list.
+  // Audit is written for admins only (staff have no access to the audit table),
+  // but a staff member's deleted item is still recoverable by an admin.
+  const removeItem = useCallback((table, item, opts = {}) => {
+    const name = opts.name || item.name || item.title || item.client || "item";
+    const module = MODULE_LABEL[table] || table;
+    const rec = {
+      id: uid(), table, module, name, item,
+      deletedBy: currentUser || "—", deletedById: me.id || null, deletedAt: Date.now(),
+    };
+    mutate(
+      (d) => ({ ...d, [table]: d[table].filter((x) => x.id !== item.id), recycle: [...d.recycle, rec] }),
+      isAdmin ? { action: opts.audit || `deleted ${module.toLowerCase()} "${name}"`, module } : null
+    );
+  }, [mutate, currentUser, isAdmin, me.id]);
+
+  // Restore a recycled row back into its original table.
+  const restoreItem = useCallback((rec) => {
+    mutate((d) => {
+      const exists = (d[rec.table] || []).some((x) => x.id === rec.item.id);
+      return {
+        ...d,
+        [rec.table]: exists ? d[rec.table] : [...(d[rec.table] || []), rec.item],
+        recycle: d.recycle.filter((r) => r.id !== rec.id),
+      };
+    }, isAdmin ? { action: `restored ${rec.module.toLowerCase()} "${rec.name}"`, module: rec.module } : null);
+  }, [mutate, isAdmin]);
+
+  // Auto-cleanup: permanently drop recycle rows older than 60 days. Runs once
+  // per load for admins (their RLS lets them delete any recycle row). This is a
+  // client-side sweep — see README for the optional server-side cron upgrade.
+  const purgedRef = useRef(false);
+  const purgeExpired = useCallback(() => {
+    const cutoff = Date.now() - RECYCLE_TTL_DAYS * 86400000;
+    setDb((prev) => {
+      if (!prev || !prev.recycle?.length) return prev;
+      const keep = prev.recycle.filter((r) => (r.deletedAt || 0) >= cutoff);
+      if (keep.length === prev.recycle.length) return prev;
+      const next = { ...prev, recycle: keep };
+      applyDiff(prev, next).catch((e) => setSyncError(e.message || String(e)));
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (isAdmin && !loading && db && !purgedRef.current) { purgedRef.current = true; purgeExpired(); }
+  }, [isAdmin, loading, db, purgeExpired]);
+
   const replaceDB = useCallback(async (d) => {
     const clean = { ...emptyDB(), ...d };
     try { await replaceAll(clean); setDb(clean); setSyncError(null); }
@@ -1848,12 +2472,38 @@ export default function App() {
 
   const openModal = (m) => setModal(m);
   const openBalance = (u) => setBalanceUser(u);
-  const go = (r) => { setRoute(r); setMenuOpen(false); };
+  const setHash = (h) => { if (window.location.hash !== h) window.location.hash = h; };
+  const go = (r) => {
+    setRoute(r); setAccountUser(null); setTaskDetailId(null); setMenuOpen(false);
+    setHash(r === "dashboard" ? "#/" : `#/${r}`);
+  };
+  const openAccount = (u) => { setAccountUser(u); setTaskDetailId(null); setRoute("accounts"); setMenuOpen(false); setHash(`#/accounts/${String(u).toLowerCase()}`); };
+  const openTask = (id) => { setTaskDetailId(id); setAccountUser(null); setRoute("tasks"); setMenuOpen(false); setHash(`#/tasks/${encodeURIComponent(id)}`); };
+  const goBackDetail = () => {
+    const target = taskDetailId ? "tasks" : "accounts";
+    setAccountUser(null); setTaskDetailId(null); setRoute(target);
+    setHash(`#/${target}`);
+  };
+
+  // keep the URL hash and the in-app view in sync (reload-safe deep links)
+  useEffect(() => {
+    const apply = () => {
+      const p = parseHash(window.location.hash);
+      setAccountUser(p.account); setTaskDetailId(p.task);
+      if (p.route) setRoute(p.route);
+    };
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, []);
 
   // open income form prefilled (used by projects / courses / marketing)
   const openIncome = (prefill) => setModal({ type: "income", initial: prefill, source: prefill?.source });
 
   const saveShare = (entry, source) => {
+    const prev = entry.id ? db.transactions.find((t) => t.id === entry.id) : null;
+    const shareChanged = prev && (prev.hajiPct !== entry.hajiPct || prev.alimPct !== entry.alimPct);
+    const shareNote = shareChanged ? ` · share ${prev.hajiPct}/${prev.alimPct} → ${entry.hajiPct}/${entry.alimPct}` : "";
     mutate((d) => {
       let next = { ...d };
       if (entry.id && d.transactions.some((t) => t.id === entry.id)) next.transactions = d.transactions.map((t) => t.id === entry.id ? entry : t);
@@ -1862,7 +2512,7 @@ export default function App() {
       if (source?.kind === "student") next.students = next.students.map((s) => s.id === source.id ? { ...s, paymentStatus: "Paid" } : s);
       if (source?.kind === "marketing") next.marketing = next.marketing.map((m) => m.id === source.id ? { ...m, lastPaid: entry.date } : m);
       return next;
-    }, { action: `${entry.id ? "updated" : "added"} ${entry.kind} ${money(entry.amount)}${entry.client ? " · " + entry.client : ""}`, module: "Accounts" });
+    }, { action: `${entry.id ? "updated" : "added"} ${entry.kind} ${money(entry.amount)}${entry.client ? " · " + entry.client : ""}${shareNote}`, module: "Accounts" });
   };
 
   const saveTask = (task, fromConcept) => {
@@ -1901,27 +2551,36 @@ export default function App() {
   const visibleNav = NAV.filter((n) => isAdmin || n[3] !== "admin");
   const allowed = isAdmin ? null : new Set(["dashboard", "tasks", "attendance", "leave", "updates"]);
   const safeRoute = !allowed || allowed.has(route) ? route : "dashboard";
-  const routeTitle = NAV.find((n) => n[0] === safeRoute)?.[1] || "";
+  const detailTask = taskDetailId ? db.tasks.find((t) => t.id === taskDetailId) : null;
+  const routeTitle =
+    accountUser && isAdmin ? `${accountUser} — account` :
+    taskDetailId ? (detailTask ? detailTask.title : "Task") :
+    NAV.find((n) => n[0] === safeRoute)?.[1] || "";
   const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || t.assignedTo === currentUser)).length;
 
   const renderPage = () => {
+    // full-page detail views take precedence over the tab routes
+    if (taskDetailId) return <TaskDetail db={db} taskId={taskDetailId} me={me} isAdmin={isAdmin} currentUser={currentUser} mutate={mutate} openModal={openModal} removeItem={removeItem} goBack={goBackDetail} />;
+    if (accountUser && isAdmin) return <AccountFull db={db} user={accountUser} goBack={goBackDetail} />;
+
     switch (safeRoute) {
       case "dashboard":
         return isAdmin
           ? <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} />
           : <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} />;
-      case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} />;
+      case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} removeItem={removeItem} />;
       case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} />;
-      case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} />;
-      case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} />;
-      case "progress": return <Progress db={db} mutate={mutate} />;
-      case "concepts": return <Concepts db={db} mutate={mutate} openModal={openModal} />;
-      case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} />;
-      case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} />;
-      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} />;
+      case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} />;
+      case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "progress": return <Progress db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} />;
+      case "concepts": return <Concepts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
+      case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
+      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
+      case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
       case "settings": return <Settings db={db} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
       default: return null;
@@ -1941,7 +2600,7 @@ export default function App() {
           {menuOpen && <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 150 }} />}
           <aside className="sidebar">
             <div className="brand">
-              <div className="brand-badge"><Hexagon size={20} fill="#fff" /></div>
+              <img className="brand-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 34 }} />
               <div><h1>ALLBEE</h1><p>Solutions</p></div>
             </div>
             {visibleNav.map(([key, label, Icon]) => (
@@ -1996,8 +2655,10 @@ export default function App() {
         {modal?.type === "marketing" && <MarketingForm initial={modal.initial} onSave={(m) => saveGeneric("marketing", m, "marketing client")} onClose={() => setModal(null)} />}
         {modal?.type === "concept" && <ConceptForm initial={modal.initial} onSave={(c) => saveGeneric("concepts", c, "idea")} onClose={() => setModal(null)} />}
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
+        {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
+        {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
 
-        {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} />}
+        {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={isAdmin ? openAccount : undefined} />}
       </div>
     </ErrorBoundary>
   );
