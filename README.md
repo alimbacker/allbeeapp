@@ -200,10 +200,11 @@ allbee-app/
    └─ AllbeeApp.jsx        # the whole app (all screens + logic)
 ```
 
-> **PDF / Excel export** uses `jspdf`, `jspdf-autotable` and `xlsx`. They are
-> loaded on demand (only when you actually export), so they don't slow startup.
-> They're installed by `npm install`; if you ever see an "export libraries"
-> message, run it again.
+> **PDF / Excel export** is fetched on demand from a CDN the moment you export
+> (SheetJS for Excel, jsPDF for PDF). It is *not* an npm/build dependency, so
+> there's nothing extra to install and nothing extra in the bundle — exporting
+> just needs an internet connection in the browser. To make it fully offline /
+> self-hosted instead, say the word and I'll switch it to bundled packages.
 
 > **60-day auto-cleanup** currently runs in the app: when an admin opens it, any
 > recycle-bin item older than 60 days is permanently removed. That's enough for a
