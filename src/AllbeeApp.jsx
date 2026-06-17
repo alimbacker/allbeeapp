@@ -1038,6 +1038,167 @@ async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
   } catch (e) { console.error(e); alert("Couldn't build the PDF — the export library failed to load. Check your internet connection and try again."); }
 }
 
+/* ── spreadsheet import (Excel / CSV / Google Sheets export) ────────────────
+   Reads an .xlsx/.xls/.csv file with SheetJS (same CDN as export), auto-maps
+   columns to fields by header name, and appends records to a chosen module.
+   Google Sheets: File → Download → .xlsx or .csv, then upload here. */
+async function loadXLSX() {
+  const m = await import(/* @vite-ignore */ EXPORT_CDN.xlsx);
+  return m.utils ? m : (m.default || m);
+}
+const impNorm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+function impPick(row, labels) {
+  const keys = Object.keys(row);
+  for (const lab of labels) {
+    const nl = impNorm(lab);
+    const hit = keys.find((k) => impNorm(k) === nl);
+    if (hit !== undefined && row[hit] !== "" && row[hit] != null) return row[hit];
+  }
+  return "";
+}
+const impNum = (v) => { const n = Number(String(v).replace(/[^0-9.\-]/g, "")); return isNaN(n) ? 0 : n; };
+const impClamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function impISO(v) {
+  if (v === "" || v == null) return "";
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+  if (typeof v === "number") { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? "" : d.toISOString().slice(0, 10); }
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // assume day/month/year (India)
+  if (m) { let [, d, mo, y] = m; if (y.length === 2) y = "20" + y; return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
+  const t = Date.parse(s); return isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
+}
+function impPay(v) { const s = String(v).toLowerCase(); if (s.includes("partial")) return "Partial"; if (s.includes("paid") && !s.includes("un")) return "Paid"; return "Unpaid"; }
+function impStatus(v) { const s = impNorm(v); if (s.includes("complete") || s === "done") return "Completed"; if (s.includes("progress")) return "In Progress"; if (s.includes("accept")) return "Accepted"; return "Created"; }
+function impPriority(v) { const s = String(v).toLowerCase(); if (s.includes("urgent")) return "Urgent"; if (s.includes("high")) return "High"; if (s.includes("low")) return "Low"; return "Medium"; }
+function impUser(v) { const s = String(v).trim().toLowerCase(); return s.startsWith("a") ? "Alim" : "Haji"; }
+
+const buildTxn = (kind) => (row) => {
+  const amount = impNum(impPick(row, ["amount", "value", "total", "price", "fee", kind]));
+  if (!amount) return null;
+  const hp = impPick(row, ["haji", "haji%", "hajipct", "hajipercent", "hajishare"]);
+  const haji = hp === "" ? 50 : impClamp(impNum(hp), 0, 100);
+  return {
+    id: uid(), kind,
+    client: String(impPick(row, ["client", "clientname", "customer"]) || "").trim(),
+    project: String(impPick(row, ["project", "projectname", "source", "work", "description"]) || "").trim(),
+    amount, date: impISO(impPick(row, ["date", "day"])) || todayISO(),
+    category: String(impPick(row, ["category", "cat", "head"]) || (kind === "income" ? "Project" : "Other")).trim() || (kind === "income" ? "Project" : "Other"),
+    hajiPct: haji, alimPct: 100 - haji,
+    notes: String(impPick(row, ["notes", "note", "remark", "remarks", "details"]) || "").trim(),
+    createdAt: Date.now(),
+  };
+};
+
+const IMPORT_TARGETS = [
+  { id: "income", label: "Accounts — income", table: "transactions", headers: ["Date", "Client", "Project", "Category", "Amount", "Haji %", "Alim %", "Notes"],
+    example: { Date: "2025-04-12", Client: "Sun Textiles", Project: "Website redesign", Category: "Project", Amount: 50000, "Haji %": 50, "Alim %": 50, Notes: "Advance" }, build: buildTxn("income") },
+  { id: "expense", label: "Accounts — expenses", table: "transactions", headers: ["Date", "Client", "Project", "Category", "Amount", "Haji %", "Alim %", "Notes"],
+    example: { Date: "2025-04-12", Client: "", Project: "", Category: "Office Rent", Amount: 12000, "Haji %": 50, "Alim %": 50, Notes: "April rent" }, build: buildTxn("expense") },
+  { id: "withdrawals", label: "Withdrawals", table: "withdrawals", headers: ["Date", "Partner", "Amount", "Notes"],
+    example: { Date: "2025-04-20", Partner: "Haji", Amount: 10000, Notes: "Personal" },
+    build: (row) => { const amount = impNum(impPick(row, ["amount", "value", "withdrawal"])); if (!amount) return null; return { id: uid(), user: impUser(impPick(row, ["partner", "user", "who", "name", "member"])), amount, date: impISO(impPick(row, ["date", "day"])) || todayISO(), notes: String(impPick(row, ["notes", "note", "remark", "reason"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "projects", label: "Projects", table: "projects", headers: ["Name", "Client", "Type", "Cost", "Start date", "Expected completion", "Stage", "Notes"],
+    example: { Name: "E-commerce site", Client: "Sun Textiles", Type: "Website", Cost: 80000, "Start date": "2025-03-01", "Expected completion": "2025-05-01", Stage: "Development", Notes: "" },
+    build: (row) => { const name = String(impPick(row, ["name", "project", "projectname", "title"]) || "").trim(); if (!name) return null; return { id: uid(), name, client: String(impPick(row, ["client", "clientname", "customer"]) || "").trim(), type: String(impPick(row, ["type", "projecttype"]) || "Website").trim() || "Website", cost: impNum(impPick(row, ["cost", "amount", "price", "value", "budget"])), start: impISO(impPick(row, ["start", "startdate", "begin"])), expected: impISO(impPick(row, ["expected", "due", "deadline", "expectedcompletion", "enddate", "completion"])), stage: String(impPick(row, ["stage", "status", "phase"]) || "Lead").trim() || "Lead", notes: String(impPick(row, ["notes", "note", "remark", "remarks", "description"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "students", label: "Courses / students", table: "students", headers: ["Name", "Phone", "Course", "Joining date", "Fee", "Payment status", "Notes"],
+    example: { Name: "Asha R", Phone: "+91 90000 00000", Course: "Full-stack web dev", "Joining date": "2025-02-15", Fee: 25000, "Payment status": "Partial", Notes: "" },
+    build: (row) => { const name = String(impPick(row, ["name", "student", "studentname"]) || "").trim(); if (!name) return null; return { id: uid(), name, phone: String(impPick(row, ["phone", "mobile", "contact", "number", "phoneno"]) || "").trim(), course: String(impPick(row, ["course", "coursename", "program", "batch"]) || "").trim(), joinDate: impISO(impPick(row, ["joindate", "joined", "joiningdate", "date", "enrolled"])), fee: impNum(impPick(row, ["fee", "amount", "cost", "fees"])), paymentStatus: impPay(impPick(row, ["paymentstatus", "status", "payment", "paid"])), notes: String(impPick(row, ["notes", "note", "remark"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "marketing", label: "Marketing clients", table: "marketing", headers: ["Client", "Business", "Plan", "Monthly fee", "Start date", "Notes"],
+    example: { Client: "GreenLeaf", Business: "GreenLeaf Cafe", Plan: "Social — Growth", "Monthly fee": 15000, "Start date": "2025-01-10", Notes: "" },
+    build: (row) => { const client = String(impPick(row, ["client", "clientname", "customer", "name"]) || "").trim(); if (!client) return null; return { id: uid(), client, business: String(impPick(row, ["business", "businessname", "company"]) || "").trim(), plan: String(impPick(row, ["plan", "planname", "package", "service"]) || "").trim(), monthlyFee: impNum(impPick(row, ["monthlyfee", "fee", "amount", "monthly", "retainer", "price"])), startDate: impISO(impPick(row, ["startdate", "start", "since", "date"])), notes: String(impPick(row, ["notes", "note", "remark"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "concepts", label: "Concepts / ideas", table: "concepts", headers: ["Title", "Notes", "Tags", "Date"],
+    example: { Title: "Subscription billing tool", Notes: "Recurring invoices for retainer clients", Tags: "saas, future", Date: "2025-04-01" },
+    build: (row) => { const title = String(impPick(row, ["title", "idea", "name", "concept"]) || "").trim(); if (!title) return null; return { id: uid(), title, notes: String(impPick(row, ["notes", "note", "details", "description"]) || "").trim(), tags: String(impPick(row, ["tags", "tag", "labels"]) || "").split(/[,;]/).map((t) => t.trim()).filter(Boolean), date: impISO(impPick(row, ["date", "day"])) || todayISO(), createdAt: Date.now() }; } },
+  { id: "tasks", label: "Tasks", table: "tasks", headers: ["Title", "Description", "Assigned by", "Assigned to", "Due date", "Priority", "Status", "Progress"],
+    example: { Title: "Design landing page", Description: "Full mockup + responsive", "Assigned by": "Haji", "Assigned to": "Alim", "Due date": "2025-05-10", Priority: "High", Status: "In Progress", Progress: 40 },
+    build: (row, ctx) => { const title = String(impPick(row, ["title", "task", "taskname", "name"]) || "").trim(); if (!title) return null; const by = String(impPick(row, ["assignedby", "by", "creator", "from"]) || ctx.currentUser || "Haji").trim() || ctx.currentUser; const toRaw = String(impPick(row, ["assignedto", "to", "assignee", "owner", "for"]) || "").trim(); const tl = toRaw.toLowerCase(); const assignedTo = (tl.includes("&") || tl.includes("both") || tl.includes("haji and alim")) ? COMBINED : tl.startsWith("h") ? "Haji" : tl.startsWith("a") ? "Alim" : (toRaw || ctx.currentUser); const status = impStatus(impPick(row, ["status", "stage"])); const progress = impClamp(impNum(impPick(row, ["progress", "percent", "percentage", "done"])), 0, 100); return { id: uid(), title, desc: String(impPick(row, ["desc", "description", "details", "notes"]) || "").trim(), assignedBy: by, assignedTo, due: impISO(impPick(row, ["due", "duedate", "deadline", "date"])), priority: impPriority(impPick(row, ["priority", "importance"])), status, progress: status === "Completed" ? 100 : progress, history: [{ status: "Created", at: Date.now(), by }], comments: [], attachments: [], createdAt: Date.now() }; } },
+];
+
+function ImportData({ mutate, currentUser, onClose }) {
+  const [targetId, setTargetId] = useState("income");
+  const [rows, setRows] = useState(null);   // raw parsed objects
+  const [fileName, setFileName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(0);
+  const fileRef = useRef(null);
+  const target = IMPORT_TARGETS.find((t) => t.id === targetId);
+  const ctx = { currentUser };
+
+  const built = useMemo(() => (rows ? rows.map((r) => target.build(r, ctx)).filter(Boolean) : []), [rows, targetId]); // eslint-disable-line
+  const previewKeys = built.length ? Object.keys(built[0]).filter((k) => !["id", "createdAt", "history", "comments", "attachments"].includes(k)) : [];
+
+  const pickFile = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
+    setErr(""); setDone(0); setRows(null); setBusy(true); setFileName(file.name);
+    try {
+      const XLSX = await loadXLSX();
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const parsed = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+      if (!parsed.length) setErr("That sheet looks empty. Make sure the first row is a header row.");
+      setRows(parsed);
+    } catch (e2) { console.error(e2); setErr("Couldn't read that file. Use .xlsx, .xls or .csv (Google Sheets → File → Download)."); }
+    finally { setBusy(false); }
+  };
+
+  const downloadTemplate = async () => {
+    await exportRowsToExcel(`allbee-${target.id}-template.xlsx`, target.label, target.headers.map((h) => ({ label: h, w: 16, value: (r) => r[h] ?? "" })), [target.example]);
+  };
+
+  const doImport = () => {
+    if (!built.length) return;
+    const recs = built;
+    mutate((d) => ({ ...d, [target.table]: [...d[target.table], ...recs] }), { action: `imported ${recs.length} record${recs.length === 1 ? "" : "s"} into ${target.label}`, module: "Settings" });
+    setDone(recs.length); setRows(null); setFileName("");
+  };
+
+  return (
+    <Modal title="Import from Excel / Google Sheets" onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Close</button>
+        <button className="btn primary" onClick={doImport} disabled={!built.length}><Upload size={16} />{built.length ? `Import ${built.length} record${built.length === 1 ? "" : "s"}` : "Import"}</button></>}>
+      {done > 0 && <div className="calc-box" style={{ borderColor: "var(--pos)", marginBottom: 14 }}><div className="calc-row" style={{ color: "var(--pos)", fontWeight: 700 }}><Check size={15} /> Imported {done} record{done === 1 ? "" : "s"} into {target.label}.</div></div>}
+
+      <Field label="What are you importing?">
+        <select className="select" value={targetId} onChange={(e) => { setTargetId(e.target.value); setRows(null); setDone(0); setErr(""); }}>
+          {IMPORT_TARGETS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+        </select>
+      </Field>
+
+      <div className="hint-line" style={{ lineHeight: 1.55, margin: "2px 0 12px" }}>
+        Your sheet's first row should be column headers. Expected columns:{" "}
+        <b>{target.headers.join(", ")}</b>. Column order doesn't matter and extra columns are ignored.{" "}
+        <button className="ttl-link" style={{ fontSize: 12.5, fontWeight: 600 }} onClick={downloadTemplate}><Download size={12} style={{ verticalAlign: -2 }} /> Download a template</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <button className="btn" onClick={() => fileRef.current?.click()} disabled={busy}><Sheet size={16} />{busy ? "Reading…" : "Choose .xlsx / .csv file"}</button>
+        {fileName && <span className="hint-line">{fileName}</span>}
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={pickFile} style={{ display: "none" }} />
+      </div>
+
+      {err && <div className="hint-line" style={{ color: "var(--neg)", display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}><AlertTriangle size={13} />{err}</div>}
+
+      {rows && built.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="hint-line" style={{ marginBottom: 8 }}>Found <b>{rows.length}</b> row{rows.length === 1 ? "" : "s"}; <b>{built.length}</b> ready to import{rows.length !== built.length ? ` (${rows.length - built.length} skipped — missing a required value)` : ""}. Preview:</div>
+          <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
+            <table className="tbl" style={{ fontSize: 12.5 }}>
+              <thead><tr>{previewKeys.map((k) => <th key={k}>{k}</th>)}</tr></thead>
+              <tbody>{built.slice(0, 6).map((r, i) => (
+                <tr key={i}>{previewKeys.map((k) => <td key={k} className={typeof r[k] === "number" ? "mono" : ""}>{Array.isArray(r[k]) ? r[k].join(", ") : String(r[k] ?? "")}</td>)}</tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {built.length > 6 && <div className="hint-line" style={{ marginTop: 6 }}>…and {built.length - 6} more.</div>}
+        </div>
+      )}
+      {rows && built.length === 0 && !err && <div className="hint-line" style={{ color: "var(--neg)", marginTop: 10 }}>No importable rows found — check that your headers match and required values (like an amount or a name) are filled in.</div>}
+    </Modal>
+  );
+}
+
 function AccountFull({ db, user, goBack }) {
   const all = useMemo(() => ledgerFor(db, user), [db, user]);
   const [from, setFrom] = useState("");
@@ -1753,8 +1914,9 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, replaceDB, syncError, currentUser, role, teamCount, sessionEmail }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail }) {
   const fileRef = useRef(null);
+  const [importOpen, setImportOpen] = useState(false);
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1786,6 +1948,14 @@ function Settings({ db, replaceDB, syncError, currentUser, role, teamCount, sess
       </div>
 
       <div className="card stat" style={{ marginBottom: 14 }}>
+        <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Import from Excel / Google Sheets</div>
+        <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
+          Bring in existing records — income, expenses, withdrawals, projects, students, marketing clients, ideas or tasks — from a spreadsheet. Upload an <b>.xlsx</b> or <b>.csv</b> file (from Google Sheets use <b>File → Download</b>). Imported rows are <b>added</b> to what's already here; they don't replace anything.
+        </p>
+        <button className="btn primary" onClick={() => setImportOpen(true)}><Sheet size={16} />Import a spreadsheet</button>
+      </div>
+
+      <div className="card stat" style={{ marginBottom: 14 }}>
         <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Your data</div>
         <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))" }}>
           {Object.entries(counts).map(([k, v]) => (
@@ -1802,6 +1972,8 @@ function Settings({ db, replaceDB, syncError, currentUser, role, teamCount, sess
           Signed in as <b style={{ color: avatarColor(currentUser) }}>{currentUser}</b>{sessionEmail ? ` (${sessionEmail})` : ""} · <b>{role === "admin" ? "Admin" : "Staff"}</b>. Records live in a shared Postgres database and sync across the team in real time{syncError ? " — but the last sync failed, so some changes may not have saved yet" : ""}. Staff accounts can't see Share &amp; accounts or Withdrawals; that's enforced by the database, not just hidden. File attachments and an installable Android version are optional add-ons documented in the project README.
         </p>
       </div>
+
+      {importOpen && <ImportData mutate={mutate} currentUser={currentUser} onClose={() => setImportOpen(false)} />}
     </div>
   );
 }
@@ -2582,7 +2754,7 @@ export default function App() {
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
       default: return null;
     }
   };
