@@ -166,8 +166,30 @@ create policy tasks_del on public.tasks for delete to authenticated
   using (public.is_admin() or (data->>'assignedBy') = public.current_name());
 select public._allbee_realtime('tasks');
 
+-- GROUP 5 — RECYCLE (recently deleted / recycle bin)
+-- Anything deleted in the app moves here first instead of being destroyed.
+-- A user can file (insert) and read back their own deletions; admins see and
+-- manage everything. There is no UPDATE policy — recycled rows are immutable.
+-- Rows are removed when an admin restores an item or when the app's 60-day
+-- auto-cleanup sweep runs (admins can delete any expired row).
+create table if not exists public.recycle (id text primary key, data jsonb not null, updated_at timestamptz not null default now());
+alter table public.recycle enable row level security;
+drop policy if exists recycle_sel on public.recycle;
+drop policy if exists recycle_ins on public.recycle;
+drop policy if exists recycle_del on public.recycle;
+create policy recycle_sel on public.recycle for select to authenticated
+  using (public.is_admin() or (data->>'deletedById') = auth.uid()::text);
+create policy recycle_ins on public.recycle for insert to authenticated
+  with check (public.is_admin() or (data->>'deletedById') = auth.uid()::text);
+create policy recycle_del on public.recycle for delete to authenticated
+  using (public.is_admin() or (data->>'deletedById') = auth.uid()::text);
+select public._allbee_realtime('recycle');
+
 -- ============================================================================
 -- AFTER RUNNING THIS
+--   0. Re-running on an existing database is safe — this script only adds what
+--      is missing. If you are upgrading, this run creates the new `recycle`
+--      table that powers the Recently deleted module.
 --   1. Authentication -> Providers -> Email: turn OFF "Confirm email" for
 --      instant logins (optional, but nice for an internal tool).
 --   2. Haji & Alim: in the app choose "Owner / admin", pick their name, and
