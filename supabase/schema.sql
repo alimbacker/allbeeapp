@@ -101,9 +101,9 @@ begin
   then execute format('alter publication supabase_realtime add table public.%I', tbl); end if;
 end $$;
 
--- GROUP 1 — ADMINS ONLY (the money + the business + the audit trail)
+-- GROUP 1 — ADMINS ONLY (the money + the business + the audit trail + the vault)
 do $$
-declare t text; tbls text[] := array['transactions','withdrawals','projects','students','marketing','concepts','audit'];
+declare t text; tbls text[] := array['transactions','withdrawals','projects','students','marketing','concepts','audit','vault'];
 begin
   foreach t in array tbls loop
     execute format('create table if not exists public.%I (id text primary key, data jsonb not null, updated_at timestamptz not null default now())', t);

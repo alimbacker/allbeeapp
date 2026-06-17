@@ -140,7 +140,7 @@ staff.
 | Daily updates | Whole team's feed | Post + see their own |
 | Team | Manage roles & access | — |
 | Share & accounts, Withdrawals | Full access | **No access (DB-enforced)** |
-| Projects, Courses, Marketing, Concepts, Recently deleted, Audit log, Settings | Full access | — |
+| Projects, Courses, Marketing, Concepts, Passwords, Recently deleted, Audit log, Settings | Full access | — |
 
 ---
 
@@ -181,6 +181,47 @@ and database as the web app.
 Admins get **Settings → Backup & restore**: **Export** downloads the whole
 database as a dated JSON file; **Import** replaces it from a backup. Supabase
 also keeps its own automatic daily backups.
+
+## Import from Excel / Google Sheets
+**Settings → Import from Excel / Google Sheets** brings in existing records —
+income, expenses, withdrawals, projects, students, marketing clients, ideas, or
+tasks — from a spreadsheet. Pick what you're importing, optionally **Download a
+template** so your columns line up, then upload an `.xlsx` or `.csv` file (from
+Google Sheets use **File → Download**). Columns are matched to fields by header
+name (order doesn't matter, extra columns are ignored), you get a preview of what
+will be added, and imported rows are **appended** — they never overwrite existing
+data. Like the export feature, the spreadsheet engine loads from a CDN on demand.
+
+## Notifications
+A bell in the top bar shows a live feed of activity that involves you — a task
+assigned to you, a task you're part of moving to a new stage, or a new comment —
+with an unread count. Opening the bell clears the count; clicking an item jumps
+straight to that task. The feed is built from synced task data, so it works on
+every device and for both admins and staff.
+
+## Mobile
+The whole app is responsive: the sidebar collapses into a hamburger menu, cards
+and summaries reflow to fit narrow screens, and the top bar condenses so it stays
+usable on a phone. Add the site to your home screen (it ships a web manifest and
+icons) for an app-like shortcut.
+
+## Passwords & logins (vault)
+The **Passwords** page (admin-only, like the money pages) keeps your shared
+business logins — Instagram, Facebook, the website, hosting, email, domains and
+so on — in one place. Each entry holds the service name, category, username/email,
+password, login URL and free-form notes (handy for recovery emails or 2FA backup
+codes). Passwords are hidden behind dots with a show/hide toggle, and there are
+one-tap **copy** buttons for the username and password. Deleting a credential
+sends it to Recently deleted like everything else (and the recycle view never
+shows the password).
+
+> **Security note.** These credentials are stored in your own Supabase database,
+> readable only by the two admin accounts (enforced by Row Level Security) and
+> served over HTTPS — the same protection as your financial data. Treat your
+> Supabase project login as the master key: use a strong, unique password and
+> turn on 2FA for your Supabase account. If you later want true end-to-end
+> encryption (a master passphrase that even the database can't read), that can be
+> added — just ask.
 
 ---
 

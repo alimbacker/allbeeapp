@@ -6,7 +6,8 @@ import {
   Download, Upload, LogOut, Hexagon, CalendarClock, ArrowRight, Menu, Wifi, WifiOff,
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
-  ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
+  ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag, Bell,
+  Eye, EyeOff, Copy,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -26,6 +27,7 @@ const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 const INCOME_CATEGORIES = ["Project", "Course", "Marketing", "Consulting", "Other"];
 const EXPENSE_CATEGORIES = ["Office Rent", "Internet", "Electricity", "Marketing", "Software", "Travel", "Other"];
 const LEAVE_TYPES = ["Casual", "Sick", "Earned", "Unpaid"];
+const VAULT_CATEGORIES = ["Social media", "Website / Hosting", "Email", "Domain", "Banking / Finance", "Tool / Software", "Other"];
 
 // Recently Deleted (recycle bin): which collections support soft-delete + restore,
 // the human label shown for each, and how long items survive before auto-cleanup.
@@ -33,6 +35,7 @@ const RECYCLE_TTL_DAYS = 60;
 const MODULE_LABEL = {
   transactions: "Accounts", withdrawals: "Withdrawals", tasks: "Tasks",
   projects: "Projects", students: "Courses", marketing: "Marketing", concepts: "Concepts",
+  vault: "Passwords",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -74,7 +77,7 @@ const sameMonth = (iso, ref = new Date()) => {
    We load every row into the in-memory shape, and on each change we persist
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
-const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle"];
+const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle", "vault"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -161,7 +164,7 @@ const emptyDB = () => ({
   version: 2,
   transactions: [], withdrawals: [], tasks: [], projects: [],
   students: [], marketing: [], concepts: [], audit: [],
-  attendance: [], leave: [], updates: [], recycle: [],
+  attendance: [], leave: [], updates: [], recycle: [], vault: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -525,6 +528,49 @@ table.tbl tr:hover td { background:var(--surface-2); }
 .ttl-link { background:none; border:none; padding:0; margin:0; font:inherit; font-weight:700; font-size:14.5px; color:var(--ink);
   cursor:pointer; text-align:left; }
 .ttl-link:hover { color:var(--primary); text-decoration:underline; }
+
+/* notifications */
+.notif-wrap { position:relative; }
+.notif-panel { position:absolute; right:0; top:46px; width:330px; max-width:86vw; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; box-shadow:0 18px 50px rgba(0,0,0,.4); z-index:300; overflow:hidden; }
+.notif-head { display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--border); font-weight:700; font-size:13.5px; }
+.notif-list { max-height:60vh; overflow-y:auto; }
+.notif-item { display:flex; gap:9px; padding:11px 13px; border-bottom:1px solid var(--border); cursor:pointer; }
+.notif-item:last-child { border-bottom:none; }
+.notif-item:hover { background:var(--surface-2); }
+.notif-item.unread { background:var(--primary-soft); }
+.notif-item .nb { flex:1; min-width:0; }
+.notif-item .nt { font-size:13.5px; line-height:1.4; }
+.notif-item .nw { font-size:11.5px; color:var(--muted); margin-top:3px; }
+.notif-dot { width:8px; height:8px; border-radius:50%; background:var(--primary); flex-shrink:0; margin-top:6px; }
+.notif-badge { position:absolute; top:-4px; right:-4px; min-width:17px; height:17px; padding:0 4px; border-radius:999px;
+  background:var(--neg); color:#fff; font-size:10px; font-weight:800; display:grid; place-items:center; border:2px solid var(--bg); }
+.notif-empty { padding:26px 16px; text-align:center; color:var(--muted); font-size:13px; line-height:1.6; }
+
+/* passwords / vault */
+.vault-row { display:flex; align-items:center; gap:8px; }
+.vault-row .vk { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); width:74px; flex-shrink:0; }
+.vault-row .vv { flex:1; min-width:0; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vault-link { display:inline-flex; align-items:center; gap:5px; color:var(--primary); text-decoration:none; font-size:13px; word-break:break-all; }
+.vault-link:hover { text-decoration:underline; }
+
+/* mobile refinements */
+@media (max-width:640px) {
+  .topbar { padding:11px 13px; gap:9px; }
+  .topbar-sub { display:none; }
+  .userchip-name { display:none; }
+  .userchip { padding:5px 7px; }
+  .company-pill { padding:6px 10px; }
+  .sumrow { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+  .meta-grid { grid-template-columns:1fr 1fr !important; }
+  .filterbar { grid-template-columns:1fr 1fr !important; }
+  .stat .num { font-size:21px; }
+  .page-head h3 { font-size:18px; }
+  .detail-head h3 { font-size:19px; }
+}
+@media (max-width:420px) {
+  .sumrow, .filterbar { grid-template-columns:1fr !important; }
+}
 `;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -926,7 +972,7 @@ function Dashboard({ db, bal, go, openBalance }) {
         </div>
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 14 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", marginBottom: 14 }}>
         {USERS.map((u) => (
           <div key={u} className="card balance-card" onClick={() => openBalance(u)}>
             <div className="stripe" style={{ background: avatarColor(u) }} />
@@ -937,7 +983,7 @@ function Dashboard({ db, bal, go, openBalance }) {
         ))}
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(4,1fr)", marginBottom: 18 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 18 }}>
         <div className="card stat"><div className="lbl"><TrendingUp size={14} /> Monthly revenue</div><div className="num mono pos-txt">{money(m.rev)}</div></div>
         <div className="card stat"><div className="lbl"><TrendingUp size={14} style={{ transform: "scaleY(-1)" }} /> Monthly expenses</div><div className="num mono neg-txt">{money(m.exp)}</div></div>
         <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("tasks")}><div className="lbl"><ListTodo size={14} /> Pending tasks</div><div className="num">{pending}</div></div>
@@ -1036,6 +1082,167 @@ async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
     });
     doc.save(filename);
   } catch (e) { console.error(e); alert("Couldn't build the PDF — the export library failed to load. Check your internet connection and try again."); }
+}
+
+/* ── spreadsheet import (Excel / CSV / Google Sheets export) ────────────────
+   Reads an .xlsx/.xls/.csv file with SheetJS (same CDN as export), auto-maps
+   columns to fields by header name, and appends records to a chosen module.
+   Google Sheets: File → Download → .xlsx or .csv, then upload here. */
+async function loadXLSX() {
+  const m = await import(/* @vite-ignore */ EXPORT_CDN.xlsx);
+  return m.utils ? m : (m.default || m);
+}
+const impNorm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+function impPick(row, labels) {
+  const keys = Object.keys(row);
+  for (const lab of labels) {
+    const nl = impNorm(lab);
+    const hit = keys.find((k) => impNorm(k) === nl);
+    if (hit !== undefined && row[hit] !== "" && row[hit] != null) return row[hit];
+  }
+  return "";
+}
+const impNum = (v) => { const n = Number(String(v).replace(/[^0-9.\-]/g, "")); return isNaN(n) ? 0 : n; };
+const impClamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function impISO(v) {
+  if (v === "" || v == null) return "";
+  if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+  if (typeof v === "number") { const d = new Date(Math.round((v - 25569) * 86400 * 1000)); return isNaN(d) ? "" : d.toISOString().slice(0, 10); }
+  const s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const m = s.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/); // assume day/month/year (India)
+  if (m) { let [, d, mo, y] = m; if (y.length === 2) y = "20" + y; return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
+  const t = Date.parse(s); return isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
+}
+function impPay(v) { const s = String(v).toLowerCase(); if (s.includes("partial")) return "Partial"; if (s.includes("paid") && !s.includes("un")) return "Paid"; return "Unpaid"; }
+function impStatus(v) { const s = impNorm(v); if (s.includes("complete") || s === "done") return "Completed"; if (s.includes("progress")) return "In Progress"; if (s.includes("accept")) return "Accepted"; return "Created"; }
+function impPriority(v) { const s = String(v).toLowerCase(); if (s.includes("urgent")) return "Urgent"; if (s.includes("high")) return "High"; if (s.includes("low")) return "Low"; return "Medium"; }
+function impUser(v) { const s = String(v).trim().toLowerCase(); return s.startsWith("a") ? "Alim" : "Haji"; }
+
+const buildTxn = (kind) => (row) => {
+  const amount = impNum(impPick(row, ["amount", "value", "total", "price", "fee", kind]));
+  if (!amount) return null;
+  const hp = impPick(row, ["haji", "haji%", "hajipct", "hajipercent", "hajishare"]);
+  const haji = hp === "" ? 50 : impClamp(impNum(hp), 0, 100);
+  return {
+    id: uid(), kind,
+    client: String(impPick(row, ["client", "clientname", "customer"]) || "").trim(),
+    project: String(impPick(row, ["project", "projectname", "source", "work", "description"]) || "").trim(),
+    amount, date: impISO(impPick(row, ["date", "day"])) || todayISO(),
+    category: String(impPick(row, ["category", "cat", "head"]) || (kind === "income" ? "Project" : "Other")).trim() || (kind === "income" ? "Project" : "Other"),
+    hajiPct: haji, alimPct: 100 - haji,
+    notes: String(impPick(row, ["notes", "note", "remark", "remarks", "details"]) || "").trim(),
+    createdAt: Date.now(),
+  };
+};
+
+const IMPORT_TARGETS = [
+  { id: "income", label: "Accounts — income", table: "transactions", headers: ["Date", "Client", "Project", "Category", "Amount", "Haji %", "Alim %", "Notes"],
+    example: { Date: "2025-04-12", Client: "Sun Textiles", Project: "Website redesign", Category: "Project", Amount: 50000, "Haji %": 50, "Alim %": 50, Notes: "Advance" }, build: buildTxn("income") },
+  { id: "expense", label: "Accounts — expenses", table: "transactions", headers: ["Date", "Client", "Project", "Category", "Amount", "Haji %", "Alim %", "Notes"],
+    example: { Date: "2025-04-12", Client: "", Project: "", Category: "Office Rent", Amount: 12000, "Haji %": 50, "Alim %": 50, Notes: "April rent" }, build: buildTxn("expense") },
+  { id: "withdrawals", label: "Withdrawals", table: "withdrawals", headers: ["Date", "Partner", "Amount", "Notes"],
+    example: { Date: "2025-04-20", Partner: "Haji", Amount: 10000, Notes: "Personal" },
+    build: (row) => { const amount = impNum(impPick(row, ["amount", "value", "withdrawal"])); if (!amount) return null; return { id: uid(), user: impUser(impPick(row, ["partner", "user", "who", "name", "member"])), amount, date: impISO(impPick(row, ["date", "day"])) || todayISO(), notes: String(impPick(row, ["notes", "note", "remark", "reason"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "projects", label: "Projects", table: "projects", headers: ["Name", "Client", "Type", "Cost", "Start date", "Expected completion", "Stage", "Notes"],
+    example: { Name: "E-commerce site", Client: "Sun Textiles", Type: "Website", Cost: 80000, "Start date": "2025-03-01", "Expected completion": "2025-05-01", Stage: "Development", Notes: "" },
+    build: (row) => { const name = String(impPick(row, ["name", "project", "projectname", "title"]) || "").trim(); if (!name) return null; return { id: uid(), name, client: String(impPick(row, ["client", "clientname", "customer"]) || "").trim(), type: String(impPick(row, ["type", "projecttype"]) || "Website").trim() || "Website", cost: impNum(impPick(row, ["cost", "amount", "price", "value", "budget"])), start: impISO(impPick(row, ["start", "startdate", "begin"])), expected: impISO(impPick(row, ["expected", "due", "deadline", "expectedcompletion", "enddate", "completion"])), stage: String(impPick(row, ["stage", "status", "phase"]) || "Lead").trim() || "Lead", notes: String(impPick(row, ["notes", "note", "remark", "remarks", "description"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "students", label: "Courses / students", table: "students", headers: ["Name", "Phone", "Course", "Joining date", "Fee", "Payment status", "Notes"],
+    example: { Name: "Asha R", Phone: "+91 90000 00000", Course: "Full-stack web dev", "Joining date": "2025-02-15", Fee: 25000, "Payment status": "Partial", Notes: "" },
+    build: (row) => { const name = String(impPick(row, ["name", "student", "studentname"]) || "").trim(); if (!name) return null; return { id: uid(), name, phone: String(impPick(row, ["phone", "mobile", "contact", "number", "phoneno"]) || "").trim(), course: String(impPick(row, ["course", "coursename", "program", "batch"]) || "").trim(), joinDate: impISO(impPick(row, ["joindate", "joined", "joiningdate", "date", "enrolled"])), fee: impNum(impPick(row, ["fee", "amount", "cost", "fees"])), paymentStatus: impPay(impPick(row, ["paymentstatus", "status", "payment", "paid"])), notes: String(impPick(row, ["notes", "note", "remark"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "marketing", label: "Marketing clients", table: "marketing", headers: ["Client", "Business", "Plan", "Monthly fee", "Start date", "Notes"],
+    example: { Client: "GreenLeaf", Business: "GreenLeaf Cafe", Plan: "Social — Growth", "Monthly fee": 15000, "Start date": "2025-01-10", Notes: "" },
+    build: (row) => { const client = String(impPick(row, ["client", "clientname", "customer", "name"]) || "").trim(); if (!client) return null; return { id: uid(), client, business: String(impPick(row, ["business", "businessname", "company"]) || "").trim(), plan: String(impPick(row, ["plan", "planname", "package", "service"]) || "").trim(), monthlyFee: impNum(impPick(row, ["monthlyfee", "fee", "amount", "monthly", "retainer", "price"])), startDate: impISO(impPick(row, ["startdate", "start", "since", "date"])), notes: String(impPick(row, ["notes", "note", "remark"]) || "").trim(), createdAt: Date.now() }; } },
+  { id: "concepts", label: "Concepts / ideas", table: "concepts", headers: ["Title", "Notes", "Tags", "Date"],
+    example: { Title: "Subscription billing tool", Notes: "Recurring invoices for retainer clients", Tags: "saas, future", Date: "2025-04-01" },
+    build: (row) => { const title = String(impPick(row, ["title", "idea", "name", "concept"]) || "").trim(); if (!title) return null; return { id: uid(), title, notes: String(impPick(row, ["notes", "note", "details", "description"]) || "").trim(), tags: String(impPick(row, ["tags", "tag", "labels"]) || "").split(/[,;]/).map((t) => t.trim()).filter(Boolean), date: impISO(impPick(row, ["date", "day"])) || todayISO(), createdAt: Date.now() }; } },
+  { id: "tasks", label: "Tasks", table: "tasks", headers: ["Title", "Description", "Assigned by", "Assigned to", "Due date", "Priority", "Status", "Progress"],
+    example: { Title: "Design landing page", Description: "Full mockup + responsive", "Assigned by": "Haji", "Assigned to": "Alim", "Due date": "2025-05-10", Priority: "High", Status: "In Progress", Progress: 40 },
+    build: (row, ctx) => { const title = String(impPick(row, ["title", "task", "taskname", "name"]) || "").trim(); if (!title) return null; const by = String(impPick(row, ["assignedby", "by", "creator", "from"]) || ctx.currentUser || "Haji").trim() || ctx.currentUser; const toRaw = String(impPick(row, ["assignedto", "to", "assignee", "owner", "for"]) || "").trim(); const tl = toRaw.toLowerCase(); const assignedTo = (tl.includes("&") || tl.includes("both") || tl.includes("haji and alim")) ? COMBINED : tl.startsWith("h") ? "Haji" : tl.startsWith("a") ? "Alim" : (toRaw || ctx.currentUser); const status = impStatus(impPick(row, ["status", "stage"])); const progress = impClamp(impNum(impPick(row, ["progress", "percent", "percentage", "done"])), 0, 100); return { id: uid(), title, desc: String(impPick(row, ["desc", "description", "details", "notes"]) || "").trim(), assignedBy: by, assignedTo, due: impISO(impPick(row, ["due", "duedate", "deadline", "date"])), priority: impPriority(impPick(row, ["priority", "importance"])), status, progress: status === "Completed" ? 100 : progress, history: [{ status: "Created", at: Date.now(), by }], comments: [], attachments: [], createdAt: Date.now() }; } },
+];
+
+function ImportData({ mutate, currentUser, onClose }) {
+  const [targetId, setTargetId] = useState("income");
+  const [rows, setRows] = useState(null);   // raw parsed objects
+  const [fileName, setFileName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(0);
+  const fileRef = useRef(null);
+  const target = IMPORT_TARGETS.find((t) => t.id === targetId);
+  const ctx = { currentUser };
+
+  const built = useMemo(() => (rows ? rows.map((r) => target.build(r, ctx)).filter(Boolean) : []), [rows, targetId]); // eslint-disable-line
+  const previewKeys = built.length ? Object.keys(built[0]).filter((k) => !["id", "createdAt", "history", "comments", "attachments"].includes(k)) : [];
+
+  const pickFile = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = ""; if (!file) return;
+    setErr(""); setDone(0); setRows(null); setBusy(true); setFileName(file.name);
+    try {
+      const XLSX = await loadXLSX();
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const parsed = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+      if (!parsed.length) setErr("That sheet looks empty. Make sure the first row is a header row.");
+      setRows(parsed);
+    } catch (e2) { console.error(e2); setErr("Couldn't read that file. Use .xlsx, .xls or .csv (Google Sheets → File → Download)."); }
+    finally { setBusy(false); }
+  };
+
+  const downloadTemplate = async () => {
+    await exportRowsToExcel(`allbee-${target.id}-template.xlsx`, target.label, target.headers.map((h) => ({ label: h, w: 16, value: (r) => r[h] ?? "" })), [target.example]);
+  };
+
+  const doImport = () => {
+    if (!built.length) return;
+    const recs = built;
+    mutate((d) => ({ ...d, [target.table]: [...d[target.table], ...recs] }), { action: `imported ${recs.length} record${recs.length === 1 ? "" : "s"} into ${target.label}`, module: "Settings" });
+    setDone(recs.length); setRows(null); setFileName("");
+  };
+
+  return (
+    <Modal title="Import from Excel / Google Sheets" onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Close</button>
+        <button className="btn primary" onClick={doImport} disabled={!built.length}><Upload size={16} />{built.length ? `Import ${built.length} record${built.length === 1 ? "" : "s"}` : "Import"}</button></>}>
+      {done > 0 && <div className="calc-box" style={{ borderColor: "var(--pos)", marginBottom: 14 }}><div className="calc-row" style={{ color: "var(--pos)", fontWeight: 700 }}><Check size={15} /> Imported {done} record{done === 1 ? "" : "s"} into {target.label}.</div></div>}
+
+      <Field label="What are you importing?">
+        <select className="select" value={targetId} onChange={(e) => { setTargetId(e.target.value); setRows(null); setDone(0); setErr(""); }}>
+          {IMPORT_TARGETS.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+        </select>
+      </Field>
+
+      <div className="hint-line" style={{ lineHeight: 1.55, margin: "2px 0 12px" }}>
+        Your sheet's first row should be column headers. Expected columns:{" "}
+        <b>{target.headers.join(", ")}</b>. Column order doesn't matter and extra columns are ignored.{" "}
+        <button className="ttl-link" style={{ fontSize: 12.5, fontWeight: 600 }} onClick={downloadTemplate}><Download size={12} style={{ verticalAlign: -2 }} /> Download a template</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+        <button className="btn" onClick={() => fileRef.current?.click()} disabled={busy}><Sheet size={16} />{busy ? "Reading…" : "Choose .xlsx / .csv file"}</button>
+        {fileName && <span className="hint-line">{fileName}</span>}
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={pickFile} style={{ display: "none" }} />
+      </div>
+
+      {err && <div className="hint-line" style={{ color: "var(--neg)", display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}><AlertTriangle size={13} />{err}</div>}
+
+      {rows && built.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="hint-line" style={{ marginBottom: 8 }}>Found <b>{rows.length}</b> row{rows.length === 1 ? "" : "s"}; <b>{built.length}</b> ready to import{rows.length !== built.length ? ` (${rows.length - built.length} skipped — missing a required value)` : ""}. Preview:</div>
+          <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
+            <table className="tbl" style={{ fontSize: 12.5 }}>
+              <thead><tr>{previewKeys.map((k) => <th key={k}>{k}</th>)}</tr></thead>
+              <tbody>{built.slice(0, 6).map((r, i) => (
+                <tr key={i}>{previewKeys.map((k) => <td key={k} className={typeof r[k] === "number" ? "mono" : ""}>{Array.isArray(r[k]) ? r[k].join(", ") : String(r[k] ?? "")}</td>)}</tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {built.length > 6 && <div className="hint-line" style={{ marginTop: 6 }}>…and {built.length - 6} more.</div>}
+        </div>
+      )}
+      {rows && built.length === 0 && !err && <div className="hint-line" style={{ color: "var(--neg)", marginTop: 10 }}>No importable rows found — check that your headers match and required values (like an amount or a name) are filled in.</div>}
+    </Modal>
+  );
 }
 
 function AccountFull({ db, user, goBack }) {
@@ -1184,11 +1391,12 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
   return (
     <div className="content">
       <div className="page-head"><h3>Share & accounts</h3><span className="spacer" />
+        <button className="btn" onClick={() => openModal({ type: "importData" })}><Sheet size={16} />Import</button>
         <button className="btn" onClick={() => openModal({ type: "expense" })}><Plus size={16} />Add expense</button>
         <button className="btn primary" onClick={() => openModal({ type: "income" })}><Plus size={16} />Add income</button>
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", marginBottom: 16 }}>
         <div className="card balance-card" onClick={() => openBalance("Haji")}><div className="stripe" style={{ background: "var(--haji)" }} />
           <div className="who"><span className="dot" style={{ background: "var(--haji)" }} /> Haji</div>
           <div className="amt mono" style={{ fontSize: 24, color: bal.Haji < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.Haji)}</div>
@@ -1246,7 +1454,7 @@ function Withdrawals({ db, bal, mutate, openModal, removeItem }) {
       <div className="page-head"><h3>Withdrawals</h3><span className="spacer" />
         <button className="btn primary" onClick={() => openModal({ type: "withdraw" })}><Plus size={16} />Record withdrawal</button></div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", marginBottom: 16 }}>
         {USERS.map((u) => (
           <div key={u} className="card stat"><div className="lbl"><span className="dot" style={{ background: avatarColor(u) }} /> {u} available</div>
             <div className="num mono" style={{ color: bal[u] < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal[u])}</div>
@@ -1566,7 +1774,7 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
   });
   const detailsOf = (r) => {
     const it = r.item || {};
-    const skip = new Set(["id", "createdAt", "history", "comments", "attachments"]);
+    const skip = new Set(["id", "createdAt", "history", "comments", "attachments", "password"]);
     return Object.entries(it).filter(([k, v]) => !skip.has(k) && v !== "" && v != null && typeof v !== "object").slice(0, 10);
   };
 
@@ -1733,6 +1941,103 @@ function Concepts({ db, mutate, openModal, removeItem }) {
   );
 }
 
+function VaultForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(() => ({ service: "", category: "Social media", username: "", password: "", url: "", notes: "", ...initial }));
+  const [show, setShow] = useState(false);
+  const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const valid = f.service.trim().length > 0;
+  const save = () => { if (!valid) return; onSave({ ...initial, id: initial?.id || uid(), service: f.service.trim(), category: f.category, username: f.username.trim(), password: f.password, url: f.url.trim(), notes: f.notes.trim(), createdAt: initial?.createdAt || Date.now() }); onClose(); };
+  return (
+    <Modal title={initial?.id ? "Edit credential" : "New credential"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Account / service" required><input className="input" value={f.service} onChange={(e) => up("service", e.target.value)} placeholder="Instagram, Facebook Page, Hosting…" /></Field>
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => up("category", e.target.value)}>{VAULT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      </div>
+      <Field label="Username / email / login ID"><input className="input" value={f.username} onChange={(e) => up("username", e.target.value)} placeholder="login id or email" /></Field>
+      <Field label="Password">
+        <div style={{ position: "relative" }}>
+          <input className="input mono" type={show ? "text" : "password"} value={f.password} onChange={(e) => up("password", e.target.value)} style={{ paddingRight: 40 }} placeholder="••••••••" />
+          <button type="button" onClick={() => setShow((s) => !s)} aria-label={show ? "Hide" : "Show"} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", display: "grid", placeItems: "center" }}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+        </div>
+      </Field>
+      <Field label="Login URL (optional)"><input className="input" value={f.url} onChange={(e) => up("url", e.target.value)} placeholder="https://instagram.com" /></Field>
+      <Field label="Notes (optional)" hint="Recovery email, 2FA backup codes, security answers…"><textarea className="textarea" style={{ minHeight: 70 }} value={f.notes} onChange={(e) => up("notes", e.target.value)} /></Field>
+    </Modal>
+  );
+}
+
+function VaultCard({ v, onEdit, onDelete }) {
+  const [show, setShow] = useState(false);
+  const [copied, setCopied] = useState("");
+  const copy = (text, what) => { if (!text || !navigator.clipboard) return; navigator.clipboard.writeText(text).then(() => { setCopied(what); setTimeout(() => setCopied(""), 1200); }).catch(() => {}); };
+  const letter = (v.service || "?").trim()[0]?.toUpperCase() || "?";
+  const href = v.url ? (/^https?:\/\//.test(v.url) ? v.url : "https://" + v.url) : null;
+  return (
+    <div className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="avatar" style={{ background: avatarColor(v.service), width: 34, height: 34, fontSize: 15, borderRadius: 9 }}>{letter}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.service}</div>
+          <div><span className="tag">{v.category}</span></div>
+        </div>
+      </div>
+      {v.username && (
+        <div className="vault-row">
+          <div className="vk">Username</div>
+          <div className="vv mono">{v.username}</div>
+          <button className="iconbtn" style={{ width: 28, height: 28 }} title="Copy username" onClick={() => copy(v.username, "user")}>{copied === "user" ? <Check size={13} color="var(--pos)" /> : <Copy size={13} />}</button>
+        </div>
+      )}
+      <div className="vault-row">
+        <div className="vk">Password</div>
+        <div className="vv mono">{v.password ? (show ? v.password : "••••••••••") : "—"}</div>
+        {v.password && <button className="iconbtn" style={{ width: 28, height: 28 }} title={show ? "Hide" : "Show"} onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>}
+        {v.password && <button className="iconbtn" style={{ width: 28, height: 28 }} title="Copy password" onClick={() => copy(v.password, "pass")}>{copied === "pass" ? <Check size={13} color="var(--pos)" /> : <Copy size={13} />}</button>}
+      </div>
+      {href && <a href={href} target="_blank" rel="noreferrer" className="vault-link"><ExternalLink size={13} /> {v.url.replace(/^https?:\/\//, "")}</a>}
+      {v.notes && <div className="hint-line" style={{ lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{v.notes}</div>}
+      <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+        <button className="btn sm" onClick={onEdit}><Pencil size={13} />Edit</button>
+        <button className="btn sm danger" onClick={onDelete}><Trash2 size={13} />Delete</button>
+      </div>
+    </div>
+  );
+}
+
+function Vault({ db, mutate, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("all");
+  const list = useMemo(() => {
+    let r = [...(db.vault || [])].sort((a, b) => (a.service || "").localeCompare(b.service || ""));
+    if (cat !== "all") r = r.filter((v) => v.category === cat);
+    if (q.trim()) { const s = q.toLowerCase(); r = r.filter((v) => [v.service, v.username, v.url, v.category, v.notes].join(" ").toLowerCase().includes(s)); }
+    return r;
+  }, [db.vault, q, cat]);
+  const cats = useMemo(() => Array.from(new Set((db.vault || []).map((v) => v.category).filter(Boolean))), [db.vault]);
+  const del = (v) => openModal({ type: "deleteConfirm", title: "Delete credential?", body: `Delete the saved login for "${v.service}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => removeItem("vault", v, { name: v.service, audit: `deleted credentials for "${v.service}"` }) });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Passwords & logins</h3><span className="spacer" />
+        <button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button></div>
+      <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+        <ShieldCheck size={13} /> Visible to admins (Haji &amp; Alim) only. Stored privately in your database — keep your Supabase login strong.
+      </div>
+      <div className="toolbar">
+        <div className="search"><Search size={16} color="var(--muted)" /><input placeholder="Search service, username, notes…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+        {cats.length > 0 && <select className="select" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: "auto" }}><option value="all">All categories</option>{cats.map((c) => <option key={c}>{c}</option>)}</select>}
+      </div>
+      {list.length === 0 ? (
+        <div className="card"><Empty icon={<KeyRound size={22} color="var(--muted)" />} title={db.vault?.length ? "Nothing matches" : "No credentials saved"} text={db.vault?.length ? "Try a different search or category." : "Save logins for Instagram, Facebook, your website, hosting, email and more — all in one place."} action={<button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button>} /></div>
+      ) : (
+        <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))" }}>
+          {list.map((v) => <VaultCard key={v.id} v={v} onEdit={() => openModal({ type: "vault", initial: v })} onDelete={() => del(v)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditLog({ db }) {
   const list = [...db.audit].reverse();
   return (
@@ -1753,7 +2058,7 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, replaceDB, syncError, currentUser, role, teamCount, sessionEmail }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, openModal }) {
   const fileRef = useRef(null);
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
@@ -1783,6 +2088,14 @@ function Settings({ db, replaceDB, syncError, currentUser, role, teamCount, sess
           <button className="btn" onClick={() => fileRef.current?.click()}><Upload size={16} />Import backup</button>
           <input ref={fileRef} type="file" accept="application/json" onChange={importJSON} style={{ display: "none" }} />
         </div>
+      </div>
+
+      <div className="card stat" style={{ marginBottom: 14 }}>
+        <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Import from Excel / Google Sheets</div>
+        <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
+          Bring in existing records — income, expenses, withdrawals, projects, students, marketing clients, ideas or tasks — from a spreadsheet. Upload an <b>.xlsx</b> or <b>.csv</b> file (from Google Sheets use <b>File → Download</b>). Imported rows are <b>added</b> to what's already here; they don't replace anything.
+        </p>
+        <button className="btn primary" onClick={() => openModal({ type: "importData" })}><Sheet size={16} />Import a spreadsheet</button>
       </div>
 
       <div className="card stat" style={{ marginBottom: 14 }}>
@@ -1936,7 +2249,7 @@ function Attendance({ db, mutate, me, isAdmin, team }) {
     <div className="content">
       <div className="page-head"><h3>Attendance</h3><span className="spacer" />
         <input className="input" type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "auto" }} /></div>
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 16 }}>
         <div className="card stat"><div className="lbl"><UserCheck size={14} /> Present</div><div className="num pos-txt">{present}</div></div>
         <div className="card stat"><div className="lbl"><Plane size={14} /> On leave</div><div className="num">{onLeave}</div></div>
         <div className="card stat"><div className="lbl"><XCircle size={14} /> Absent</div><div className="num neg-txt">{absent}</div></div>
@@ -2181,6 +2494,7 @@ const NAV = [
   ["marketing", "Marketing", Megaphone, "admin"],
   ["concepts", "Concepts", Lightbulb, "admin"],
   ["progress", "Progress", TrendingUp, "admin"],
+  ["vault", "Passwords", KeyRound, "admin"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
   ["settings", "Settings", SettingsIcon, "admin"],
@@ -2325,6 +2639,77 @@ function NamePicker({ isDark, onChoose }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Build a per-user notification feed from task activity (assignments, status
+// changes and comments made by other people on tasks the user is part of).
+// Works for admins and staff alike, and stays in sync because tasks sync.
+function notificationsFor(db, me) {
+  if (!me?.name) return [];
+  const name = me.name;
+  const out = [];
+  for (const t of (db.tasks || [])) {
+    const mine = taskAssignees(t).includes(name);
+    const involved = t.assignedBy === name || mine;
+    if (!involved) continue;
+    for (const h of (t.history || [])) {
+      if (!h || !h.at || h.by === name) continue;
+      let text;
+      if (h.status === "Created") { if (!mine) continue; text = `${h.by} assigned you "${t.title}"`; }
+      else text = `${h.by} moved "${t.title}" to ${h.status}`;
+      out.push({ id: `h:${t.id}:${h.at}:${h.status}`, at: h.at, text, taskId: t.id });
+    }
+    for (const c of (t.comments || [])) {
+      if (!c || c.by === name || !c.at) continue;
+      out.push({ id: `c:${t.id}:${c.id || c.at}`, at: c.at, text: `${c.by} commented on "${t.title}"`, taskId: t.id });
+    }
+  }
+  out.sort((a, b) => b.at - a.at);
+  return out.slice(0, 40);
+}
+
+function NotifBell({ db, me, openTask }) {
+  const key = `allbee:notifseen:${me?.name || "x"}`;
+  const readSeen = () => { try { return Number(localStorage.getItem(key) || 0); } catch { return 0; } };
+  const [seen, setSeen] = useState(readSeen);
+  const [open, setOpen] = useState(false);
+  const prevSeen = useRef(seen);
+  const list = useMemo(() => notificationsFor(db, me), [db, me]);
+  const unread = list.filter((n) => n.at > seen).length;
+
+  const persist = (v) => { setSeen(v); try { localStorage.setItem(key, String(v)); } catch {} };
+  const toggle = () => setOpen((o) => { const nx = !o; if (nx) { prevSeen.current = seen; persist(Date.now()); } return nx; });
+  const markAll = () => { prevSeen.current = Date.now(); persist(Date.now()); };
+  const onPick = (n) => { setOpen(false); if (n.taskId) openTask(n.taskId); };
+
+  return (
+    <div className="notif-wrap">
+      <button className="iconbtn" onClick={toggle} aria-label="Notifications" style={{ position: "relative" }}>
+        <Bell size={18} />
+        {unread > 0 && <span className="notif-badge">{unread > 9 ? "9+" : unread}</span>}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 290 }} />
+          <div className="notif-panel">
+            <div className="notif-head"><Bell size={15} /> Notifications <span style={{ flex: 1 }} />
+              {list.length > 0 && <button className="ttl-link" style={{ fontSize: 12, fontWeight: 600 }} onClick={markAll}>Mark all read</button>}
+            </div>
+            <div className="notif-list">
+              {list.length === 0 ? (
+                <div className="notif-empty">You're all caught up.<br />Task assignments, updates and comments appear here.</div>
+              ) : list.map((n) => (
+                <div key={n.id} className={"notif-item" + (n.at > prevSeen.current ? " unread" : "")} onClick={() => onPick(n)}>
+                  {n.at > prevSeen.current ? <span className="notif-dot" /> : <span style={{ width: 8, flexShrink: 0 }} />}
+                  <div className="nb"><div className="nt">{n.text}</div><div className="nw">{fmtTime(n.at)}</div></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2581,8 +2966,9 @@ export default function App() {
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
+      case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} openModal={openModal} />;
       default: return null;
     }
   };
@@ -2623,6 +3009,7 @@ export default function App() {
                   <div><div className="lbl">Company balance</div><div className="val mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div></div>
                 </div>
               )}
+              <div style={{ marginLeft: isAdmin ? 0 : "auto" }}><NotifBell db={db} me={me} openTask={openTask} /></div>
               <div className="usermenu">
                 <div className="userchip" onClick={() => setUserMenu((v) => !v)}>
                   <div className="avatar" style={{ background: avatarColor(currentUser) }}>{currentUser[0]}</div>
@@ -2657,6 +3044,8 @@ export default function App() {
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
+        {modal?.type === "importData" && <ImportData mutate={mutate} currentUser={currentUser} onClose={() => setModal(null)} />}
+        {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(v) => mutate((d) => ({ ...d, vault: d.vault.some((x) => x.id === v.id) ? d.vault.map((x) => x.id === v.id ? v : x) : [...d.vault, v] }), { action: `${db.vault.some((x) => x.id === v.id) ? "updated" : "added"} credentials for ${v.service}`, module: "Passwords" })} onClose={() => setModal(null)} />}
 
         {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={isAdmin ? openAccount : undefined} />}
       </div>
