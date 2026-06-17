@@ -17,6 +17,45 @@ and **syncs live** across the team.
 
 ---
 
+## What's new in Phase 2
+
+- **New logo** across the sidebar, login screen, browser tab (favicon) and the
+  installable mobile-app icon, in both light and dark mode.
+- **Full balance breakdown pages.** The quick balance popup stays; it now has an
+  **Open full view** button that opens a dedicated page for each partner
+  (`#/accounts/haji`, `#/accounts/alim`) with summary cards, a detailed
+  transaction table (running balance, credited/debited, share %, notes),
+  date/client/project/category **filters**, and **Export to PDF / Excel**.
+- **Task assignment to both partners.** Tasks can now be assigned to **Haji**,
+  **Alim**, or **Haji & Alim**.
+- **Task permissions.** Only the assigned person can **Accept → Start →
+  Complete**. The creator (and admins) can view, edit, delete and *monitor*, but
+  cannot move someone else's task through its status.
+- **Undo a completed task.** The Completed tab has an **Undo** button that sends a
+  task back to *In Progress* — and records it in the audit log.
+- **Task detail page.** Click a task title to open `#/tasks/<id>` with its full
+  description, people, due date, priority, an **activity timeline**, **attachments**
+  (links) and **comments**.
+- **Safe delete everywhere.** Deleting anything (tasks, projects, courses,
+  students, marketing, concepts, account entries, withdrawals) now asks you to
+  type **CONFIRM** first — no more single-click deletes.
+- **Recently deleted (recycle bin).** Deleted items move here first instead of
+  being destroyed. Admins can **Restore** any item (also CONFIRM-gated), see who
+  deleted it and when, and expand the original details. There is **no
+  permanent-delete** button anywhere.
+- **60-day auto-cleanup.** Items in Recently deleted are removed automatically 60
+  days after deletion (see the note under *Project structure* about the optional
+  server-side cron).
+- **Richer audit log.** Deletes, restores, task undos, share-percentage changes
+  and balance/project edits are all recorded permanently.
+
+> **Upgrading an existing install?** Just re-run `supabase/schema.sql` in the
+> Supabase SQL Editor (it only adds what's missing) — this creates the new
+> `recycle` table that powers Recently deleted. Then `npm install` to pull in the
+> PDF/Excel export libraries, and redeploy.
+
+---
+
 ## What you need
 - A free [Supabase](https://supabase.com) account.
 - [Node.js](https://nodejs.org) 18+.
@@ -101,7 +140,7 @@ staff.
 | Daily updates | Whole team's feed | Post + see their own |
 | Team | Manage roles & access | — |
 | Share & accounts, Withdrawals | Full access | **No access (DB-enforced)** |
-| Projects, Courses, Marketing, Concepts, Audit log, Settings | Full access | — |
+| Projects, Courses, Marketing, Concepts, Recently deleted, Audit log, Settings | Full access | — |
 
 ---
 
@@ -117,10 +156,13 @@ to the home screen for an app-like shortcut.
 ## Optional add-ons
 
 ### File attachments
-Supabase has built-in storage. Create a **Storage** bucket named `attachments`,
-add a policy for authenticated read/write, then upload with
-`supabase.storage.from('attachments').upload(path, file)` and store the path on
-the record. Ask and I'll wire this into the task / project / expense forms.
+Task detail pages already support **link attachments** (paste a Drive/Dropbox/etc
+URL). For **direct file uploads**, Supabase has built-in storage: create a
+**Storage** bucket named `attachments`, add a policy for authenticated
+read/write, then upload with
+`supabase.storage.from('attachments').upload(path, file)` and store the returned
+path on the record. Ask and I'll wire real uploads into the task / project /
+expense forms.
 
 ### Installable Android app
 Wrap the same build with [Capacitor](https://capacitorjs.com) — no rewrite:
@@ -149,6 +191,7 @@ allbee-app/
 ├─ package.json
 ├─ vite.config.js
 ├─ .env.example
+├─ public/                 # logo, favicon, app icons, manifest.webmanifest
 ├─ supabase/
 │  └─ schema.sql          # run once in Supabase — tables, roles, security
 └─ src/
@@ -156,6 +199,18 @@ allbee-app/
    ├─ supabaseClient.js
    └─ AllbeeApp.jsx        # the whole app (all screens + logic)
 ```
+
+> **PDF / Excel export** is fetched on demand from a CDN the moment you export
+> (SheetJS for Excel, jsPDF for PDF). It is *not* an npm/build dependency, so
+> there's nothing extra to install and nothing extra in the bundle — exporting
+> just needs an internet connection in the browser. To make it fully offline /
+> self-hosted instead, say the word and I'll switch it to bundled packages.
+
+> **60-day auto-cleanup** currently runs in the app: when an admin opens it, any
+> recycle-bin item older than 60 days is permanently removed. That's enough for a
+> small team. If you'd rather have it run even when nobody's logged in, add a
+> Supabase **scheduled function** (pg_cron) that deletes from `recycle` where the
+> stored `deletedAt` is older than 60 days — ask and I'll provide the SQL.
 
 ## How it works (for whoever maintains it)
 - The database loads into memory as one object; balances and reports are
