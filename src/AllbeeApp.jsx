@@ -6,7 +6,8 @@ import {
   Download, Upload, LogOut, Hexagon, CalendarClock, ArrowRight, Menu, Wifi, WifiOff,
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
-  ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
+  ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag, Bell,
+  Eye, EyeOff, Copy,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -26,6 +27,7 @@ const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 const INCOME_CATEGORIES = ["Project", "Course", "Marketing", "Consulting", "Other"];
 const EXPENSE_CATEGORIES = ["Office Rent", "Internet", "Electricity", "Marketing", "Software", "Travel", "Other"];
 const LEAVE_TYPES = ["Casual", "Sick", "Earned", "Unpaid"];
+const VAULT_CATEGORIES = ["Social media", "Website / Hosting", "Email", "Domain", "Banking / Finance", "Tool / Software", "Other"];
 
 // Recently Deleted (recycle bin): which collections support soft-delete + restore,
 // the human label shown for each, and how long items survive before auto-cleanup.
@@ -33,6 +35,7 @@ const RECYCLE_TTL_DAYS = 60;
 const MODULE_LABEL = {
   transactions: "Accounts", withdrawals: "Withdrawals", tasks: "Tasks",
   projects: "Projects", students: "Courses", marketing: "Marketing", concepts: "Concepts",
+  vault: "Passwords",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -74,7 +77,7 @@ const sameMonth = (iso, ref = new Date()) => {
    We load every row into the in-memory shape, and on each change we persist
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
-const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle"];
+const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle", "vault"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -161,7 +164,7 @@ const emptyDB = () => ({
   version: 2,
   transactions: [], withdrawals: [], tasks: [], projects: [],
   students: [], marketing: [], concepts: [], audit: [],
-  attendance: [], leave: [], updates: [], recycle: [],
+  attendance: [], leave: [], updates: [], recycle: [], vault: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -255,6 +258,7 @@ function marketingDue(m) {
 ══════════════════════════════════════════════════════════════════════ */
 const CSS = `
 .allbee, .allbee * { box-sizing: border-box; }
+html, body { max-width: 100%; overflow-x: hidden; }
 .allbee {
   --bg:#F6F7F9; --surface:#FFFFFF; --surface-2:#F0F2F6; --ink:#161A20; --muted:#626C7A;
   --border:#E4E8EF; --primary:#2E3B8F; --primary-soft:#E9EBFA; --accent:#EAA417;
@@ -525,6 +529,51 @@ table.tbl tr:hover td { background:var(--surface-2); }
 .ttl-link { background:none; border:none; padding:0; margin:0; font:inherit; font-weight:700; font-size:14.5px; color:var(--ink);
   cursor:pointer; text-align:left; }
 .ttl-link:hover { color:var(--primary); text-decoration:underline; }
+
+/* notifications */
+.notif-wrap { position:relative; }
+.notif-panel { position:absolute; right:0; top:46px; width:330px; max-width:86vw; background:var(--surface); border:1px solid var(--border);
+  border-radius:12px; box-shadow:0 18px 50px rgba(0,0,0,.4); z-index:300; overflow:hidden; }
+.notif-head { display:flex; align-items:center; gap:8px; padding:11px 13px; border-bottom:1px solid var(--border); font-weight:700; font-size:13.5px; }
+.notif-list { max-height:60vh; overflow-y:auto; }
+.notif-item { display:flex; gap:9px; padding:11px 13px; border-bottom:1px solid var(--border); cursor:pointer; }
+.notif-item:last-child { border-bottom:none; }
+.notif-item:hover { background:var(--surface-2); }
+.notif-item.unread { background:var(--primary-soft); }
+.notif-item .nb { flex:1; min-width:0; }
+.notif-item .nt { font-size:13.5px; line-height:1.4; }
+.notif-item .nw { font-size:11.5px; color:var(--muted); margin-top:3px; }
+.notif-dot { width:8px; height:8px; border-radius:50%; background:var(--primary); flex-shrink:0; margin-top:6px; }
+.notif-badge { position:absolute; top:-4px; right:-4px; min-width:17px; height:17px; padding:0 4px; border-radius:999px;
+  background:var(--neg); color:#fff; font-size:10px; font-weight:800; display:grid; place-items:center; border:2px solid var(--bg); }
+.notif-empty { padding:26px 16px; text-align:center; color:var(--muted); font-size:13px; line-height:1.6; }
+
+/* passwords / vault */
+.vault-row { display:flex; align-items:center; gap:8px; }
+.vault-row .vk { font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); width:74px; flex-shrink:0; }
+.vault-row .vv { flex:1; min-width:0; font-size:13.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.vault-link { display:inline-flex; align-items:center; gap:5px; color:var(--primary); text-decoration:none; font-size:13px; word-break:break-all; }
+.vault-link:hover { text-decoration:underline; }
+
+/* mobile refinements */
+@media (max-width:640px) {
+  .topbar { padding:11px 13px; gap:9px; }
+  .topbar-sub { display:none; }
+  .userchip-name { display:none; }
+  .userchip { padding:5px 7px; }
+  .company-pill { padding:6px 10px; }
+  .topbar h2 { font-size:16px; max-width:44vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .content { padding:14px; }
+  .sumrow { grid-template-columns:repeat(2,minmax(0,1fr)) !important; }
+  .meta-grid { grid-template-columns:1fr 1fr !important; }
+  .filterbar { grid-template-columns:1fr 1fr !important; }
+  .stat .num { font-size:21px; }
+  .page-head h3 { font-size:18px; }
+  .detail-head h3 { font-size:19px; }
+}
+@media (max-width:420px) {
+  .sumrow, .filterbar { grid-template-columns:1fr !important; }
+}
 `;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -926,7 +975,7 @@ function Dashboard({ db, bal, go, openBalance }) {
         </div>
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 14 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", marginBottom: 14 }}>
         {USERS.map((u) => (
           <div key={u} className="card balance-card" onClick={() => openBalance(u)}>
             <div className="stripe" style={{ background: avatarColor(u) }} />
@@ -937,7 +986,7 @@ function Dashboard({ db, bal, go, openBalance }) {
         ))}
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(4,1fr)", marginBottom: 18 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 18 }}>
         <div className="card stat"><div className="lbl"><TrendingUp size={14} /> Monthly revenue</div><div className="num mono pos-txt">{money(m.rev)}</div></div>
         <div className="card stat"><div className="lbl"><TrendingUp size={14} style={{ transform: "scaleY(-1)" }} /> Monthly expenses</div><div className="num mono neg-txt">{money(m.exp)}</div></div>
         <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("tasks")}><div className="lbl"><ListTodo size={14} /> Pending tasks</div><div className="num">{pending}</div></div>
@@ -1345,11 +1394,12 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
   return (
     <div className="content">
       <div className="page-head"><h3>Share & accounts</h3><span className="spacer" />
+        <button className="btn" onClick={() => openModal({ type: "importData" })}><Sheet size={16} />Import</button>
         <button className="btn" onClick={() => openModal({ type: "expense" })}><Plus size={16} />Add expense</button>
         <button className="btn primary" onClick={() => openModal({ type: "income" })}><Plus size={16} />Add income</button>
       </div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", marginBottom: 16 }}>
         <div className="card balance-card" onClick={() => openBalance("Haji")}><div className="stripe" style={{ background: "var(--haji)" }} />
           <div className="who"><span className="dot" style={{ background: "var(--haji)" }} /> Haji</div>
           <div className="amt mono" style={{ fontSize: 24, color: bal.Haji < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.Haji)}</div>
@@ -1407,7 +1457,7 @@ function Withdrawals({ db, bal, mutate, openModal, removeItem }) {
       <div className="page-head"><h3>Withdrawals</h3><span className="spacer" />
         <button className="btn primary" onClick={() => openModal({ type: "withdraw" })}><Plus size={16} />Record withdrawal</button></div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", marginBottom: 16 }}>
         {USERS.map((u) => (
           <div key={u} className="card stat"><div className="lbl"><span className="dot" style={{ background: avatarColor(u) }} /> {u} available</div>
             <div className="num mono" style={{ color: bal[u] < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal[u])}</div>
@@ -1727,7 +1777,7 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
   });
   const detailsOf = (r) => {
     const it = r.item || {};
-    const skip = new Set(["id", "createdAt", "history", "comments", "attachments"]);
+    const skip = new Set(["id", "createdAt", "history", "comments", "attachments", "password"]);
     return Object.entries(it).filter(([k, v]) => !skip.has(k) && v !== "" && v != null && typeof v !== "object").slice(0, 10);
   };
 
@@ -1894,6 +1944,103 @@ function Concepts({ db, mutate, openModal, removeItem }) {
   );
 }
 
+function VaultForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(() => ({ service: "", category: "Social media", username: "", password: "", url: "", notes: "", ...initial }));
+  const [show, setShow] = useState(false);
+  const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const valid = f.service.trim().length > 0;
+  const save = () => { if (!valid) return; onSave({ ...initial, id: initial?.id || uid(), service: f.service.trim(), category: f.category, username: f.username.trim(), password: f.password, url: f.url.trim(), notes: f.notes.trim(), createdAt: initial?.createdAt || Date.now() }); onClose(); };
+  return (
+    <Modal title={initial?.id ? "Edit credential" : "New credential"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Account / service" required><input className="input" value={f.service} onChange={(e) => up("service", e.target.value)} placeholder="Instagram, Facebook Page, Hosting…" /></Field>
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => up("category", e.target.value)}>{VAULT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      </div>
+      <Field label="Username / email / login ID"><input className="input" value={f.username} onChange={(e) => up("username", e.target.value)} placeholder="login id or email" /></Field>
+      <Field label="Password">
+        <div style={{ position: "relative" }}>
+          <input className="input mono" type={show ? "text" : "password"} value={f.password} onChange={(e) => up("password", e.target.value)} style={{ paddingRight: 40 }} placeholder="••••••••" />
+          <button type="button" onClick={() => setShow((s) => !s)} aria-label={show ? "Hide" : "Show"} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", cursor: "pointer", color: "var(--muted)", display: "grid", placeItems: "center" }}>{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+        </div>
+      </Field>
+      <Field label="Login URL (optional)"><input className="input" value={f.url} onChange={(e) => up("url", e.target.value)} placeholder="https://instagram.com" /></Field>
+      <Field label="Notes (optional)" hint="Recovery email, 2FA backup codes, security answers…"><textarea className="textarea" style={{ minHeight: 70 }} value={f.notes} onChange={(e) => up("notes", e.target.value)} /></Field>
+    </Modal>
+  );
+}
+
+function VaultCard({ v, onEdit, onDelete }) {
+  const [show, setShow] = useState(false);
+  const [copied, setCopied] = useState("");
+  const copy = (text, what) => { if (!text || !navigator.clipboard) return; navigator.clipboard.writeText(text).then(() => { setCopied(what); setTimeout(() => setCopied(""), 1200); }).catch(() => {}); };
+  const letter = (v.service || "?").trim()[0]?.toUpperCase() || "?";
+  const href = v.url ? (/^https?:\/\//.test(v.url) ? v.url : "https://" + v.url) : null;
+  return (
+    <div className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span className="avatar" style={{ background: avatarColor(v.service), width: 34, height: 34, fontSize: 15, borderRadius: 9 }}>{letter}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.service}</div>
+          <div><span className="tag">{v.category}</span></div>
+        </div>
+      </div>
+      {v.username && (
+        <div className="vault-row">
+          <div className="vk">Username</div>
+          <div className="vv mono">{v.username}</div>
+          <button className="iconbtn" style={{ width: 28, height: 28 }} title="Copy username" onClick={() => copy(v.username, "user")}>{copied === "user" ? <Check size={13} color="var(--pos)" /> : <Copy size={13} />}</button>
+        </div>
+      )}
+      <div className="vault-row">
+        <div className="vk">Password</div>
+        <div className="vv mono">{v.password ? (show ? v.password : "••••••••••") : "—"}</div>
+        {v.password && <button className="iconbtn" style={{ width: 28, height: 28 }} title={show ? "Hide" : "Show"} onClick={() => setShow((s) => !s)}>{show ? <EyeOff size={13} /> : <Eye size={13} />}</button>}
+        {v.password && <button className="iconbtn" style={{ width: 28, height: 28 }} title="Copy password" onClick={() => copy(v.password, "pass")}>{copied === "pass" ? <Check size={13} color="var(--pos)" /> : <Copy size={13} />}</button>}
+      </div>
+      {href && <a href={href} target="_blank" rel="noreferrer" className="vault-link"><ExternalLink size={13} /> {v.url.replace(/^https?:\/\//, "")}</a>}
+      {v.notes && <div className="hint-line" style={{ lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{v.notes}</div>}
+      <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+        <button className="btn sm" onClick={onEdit}><Pencil size={13} />Edit</button>
+        <button className="btn sm danger" onClick={onDelete}><Trash2 size={13} />Delete</button>
+      </div>
+    </div>
+  );
+}
+
+function Vault({ db, mutate, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("all");
+  const list = useMemo(() => {
+    let r = [...(db.vault || [])].sort((a, b) => (a.service || "").localeCompare(b.service || ""));
+    if (cat !== "all") r = r.filter((v) => v.category === cat);
+    if (q.trim()) { const s = q.toLowerCase(); r = r.filter((v) => [v.service, v.username, v.url, v.category, v.notes].join(" ").toLowerCase().includes(s)); }
+    return r;
+  }, [db.vault, q, cat]);
+  const cats = useMemo(() => Array.from(new Set((db.vault || []).map((v) => v.category).filter(Boolean))), [db.vault]);
+  const del = (v) => openModal({ type: "deleteConfirm", title: "Delete credential?", body: `Delete the saved login for "${v.service}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => removeItem("vault", v, { name: v.service, audit: `deleted credentials for "${v.service}"` }) });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Passwords & logins</h3><span className="spacer" />
+        <button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button></div>
+      <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+        <ShieldCheck size={13} /> Visible to admins (Haji &amp; Alim) only. Stored privately in your database — keep your Supabase login strong.
+      </div>
+      <div className="toolbar">
+        <div className="search"><Search size={16} color="var(--muted)" /><input placeholder="Search service, username, notes…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+        {cats.length > 0 && <select className="select" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: "auto" }}><option value="all">All categories</option>{cats.map((c) => <option key={c}>{c}</option>)}</select>}
+      </div>
+      {list.length === 0 ? (
+        <div className="card"><Empty icon={<KeyRound size={22} color="var(--muted)" />} title={db.vault?.length ? "Nothing matches" : "No credentials saved"} text={db.vault?.length ? "Try a different search or category." : "Save logins for Instagram, Facebook, your website, hosting, email and more — all in one place."} action={<button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button>} /></div>
+      ) : (
+        <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))" }}>
+          {list.map((v) => <VaultCard key={v.id} v={v} onEdit={() => openModal({ type: "vault", initial: v })} onDelete={() => del(v)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AuditLog({ db }) {
   const list = [...db.audit].reverse();
   return (
@@ -1914,9 +2061,8 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, openModal }) {
   const fileRef = useRef(null);
-  const [importOpen, setImportOpen] = useState(false);
   const exportJSON = () => {
     const blob = new Blob([JSON.stringify(db, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1952,7 +2098,7 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
         <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
           Bring in existing records — income, expenses, withdrawals, projects, students, marketing clients, ideas or tasks — from a spreadsheet. Upload an <b>.xlsx</b> or <b>.csv</b> file (from Google Sheets use <b>File → Download</b>). Imported rows are <b>added</b> to what's already here; they don't replace anything.
         </p>
-        <button className="btn primary" onClick={() => setImportOpen(true)}><Sheet size={16} />Import a spreadsheet</button>
+        <button className="btn primary" onClick={() => openModal({ type: "importData" })}><Sheet size={16} />Import a spreadsheet</button>
       </div>
 
       <div className="card stat" style={{ marginBottom: 14 }}>
@@ -1972,8 +2118,6 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
           Signed in as <b style={{ color: avatarColor(currentUser) }}>{currentUser}</b>{sessionEmail ? ` (${sessionEmail})` : ""} · <b>{role === "admin" ? "Admin" : "Staff"}</b>. Records live in a shared Postgres database and sync across the team in real time{syncError ? " — but the last sync failed, so some changes may not have saved yet" : ""}. Staff accounts can't see Share &amp; accounts or Withdrawals; that's enforced by the database, not just hidden. File attachments and an installable Android version are optional add-ons documented in the project README.
         </p>
       </div>
-
-      {importOpen && <ImportData mutate={mutate} currentUser={currentUser} onClose={() => setImportOpen(false)} />}
     </div>
   );
 }
@@ -2108,7 +2252,7 @@ function Attendance({ db, mutate, me, isAdmin, team }) {
     <div className="content">
       <div className="page-head"><h3>Attendance</h3><span className="spacer" />
         <input className="input" type="date" value={date} max={today} onChange={(e) => setDate(e.target.value)} style={{ width: "auto" }} /></div>
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 16 }}>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 16 }}>
         <div className="card stat"><div className="lbl"><UserCheck size={14} /> Present</div><div className="num pos-txt">{present}</div></div>
         <div className="card stat"><div className="lbl"><Plane size={14} /> On leave</div><div className="num">{onLeave}</div></div>
         <div className="card stat"><div className="lbl"><XCircle size={14} /> Absent</div><div className="num neg-txt">{absent}</div></div>
@@ -2353,6 +2497,7 @@ const NAV = [
   ["marketing", "Marketing", Megaphone, "admin"],
   ["concepts", "Concepts", Lightbulb, "admin"],
   ["progress", "Progress", TrendingUp, "admin"],
+  ["vault", "Passwords", KeyRound, "admin"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
   ["settings", "Settings", SettingsIcon, "admin"],
@@ -2497,6 +2642,77 @@ function NamePicker({ isDark, onChoose }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// Build a per-user notification feed from task activity (assignments, status
+// changes and comments made by other people on tasks the user is part of).
+// Works for admins and staff alike, and stays in sync because tasks sync.
+function notificationsFor(db, me) {
+  if (!me?.name) return [];
+  const name = me.name;
+  const out = [];
+  for (const t of (db.tasks || [])) {
+    const mine = taskAssignees(t).includes(name);
+    const involved = t.assignedBy === name || mine;
+    if (!involved) continue;
+    for (const h of (t.history || [])) {
+      if (!h || !h.at || h.by === name) continue;
+      let text;
+      if (h.status === "Created") { if (!mine) continue; text = `${h.by} assigned you "${t.title}"`; }
+      else text = `${h.by} moved "${t.title}" to ${h.status}`;
+      out.push({ id: `h:${t.id}:${h.at}:${h.status}`, at: h.at, text, taskId: t.id });
+    }
+    for (const c of (t.comments || [])) {
+      if (!c || c.by === name || !c.at) continue;
+      out.push({ id: `c:${t.id}:${c.id || c.at}`, at: c.at, text: `${c.by} commented on "${t.title}"`, taskId: t.id });
+    }
+  }
+  out.sort((a, b) => b.at - a.at);
+  return out.slice(0, 40);
+}
+
+function NotifBell({ db, me, openTask }) {
+  const key = `allbee:notifseen:${me?.name || "x"}`;
+  const readSeen = () => { try { return Number(localStorage.getItem(key) || 0); } catch { return 0; } };
+  const [seen, setSeen] = useState(readSeen);
+  const [open, setOpen] = useState(false);
+  const prevSeen = useRef(seen);
+  const list = useMemo(() => notificationsFor(db, me), [db, me]);
+  const unread = list.filter((n) => n.at > seen).length;
+
+  const persist = (v) => { setSeen(v); try { localStorage.setItem(key, String(v)); } catch {} };
+  const toggle = () => setOpen((o) => { const nx = !o; if (nx) { prevSeen.current = seen; persist(Date.now()); } return nx; });
+  const markAll = () => { prevSeen.current = Date.now(); persist(Date.now()); };
+  const onPick = (n) => { setOpen(false); if (n.taskId) openTask(n.taskId); };
+
+  return (
+    <div className="notif-wrap">
+      <button className="iconbtn" onClick={toggle} aria-label="Notifications" style={{ position: "relative" }}>
+        <Bell size={18} />
+        {unread > 0 && <span className="notif-badge">{unread > 9 ? "9+" : unread}</span>}
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 290 }} />
+          <div className="notif-panel">
+            <div className="notif-head"><Bell size={15} /> Notifications <span style={{ flex: 1 }} />
+              {list.length > 0 && <button className="ttl-link" style={{ fontSize: 12, fontWeight: 600 }} onClick={markAll}>Mark all read</button>}
+            </div>
+            <div className="notif-list">
+              {list.length === 0 ? (
+                <div className="notif-empty">You're all caught up.<br />Task assignments, updates and comments appear here.</div>
+              ) : list.map((n) => (
+                <div key={n.id} className={"notif-item" + (n.at > prevSeen.current ? " unread" : "")} onClick={() => onPick(n)}>
+                  {n.at > prevSeen.current ? <span className="notif-dot" /> : <span style={{ width: 8, flexShrink: 0 }} />}
+                  <div className="nb"><div className="nt">{n.text}</div><div className="nw">{fmtTime(n.at)}</div></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2753,8 +2969,9 @@ export default function App() {
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
+      case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} openModal={openModal} />;
       default: return null;
     }
   };
@@ -2795,6 +3012,7 @@ export default function App() {
                   <div><div className="lbl">Company balance</div><div className="val mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div></div>
                 </div>
               )}
+              <div style={{ marginLeft: isAdmin ? 0 : "auto" }}><NotifBell db={db} me={me} openTask={openTask} /></div>
               <div className="usermenu">
                 <div className="userchip" onClick={() => setUserMenu((v) => !v)}>
                   <div className="avatar" style={{ background: avatarColor(currentUser) }}>{currentUser[0]}</div>
@@ -2829,6 +3047,8 @@ export default function App() {
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
+        {modal?.type === "importData" && <ImportData mutate={mutate} currentUser={currentUser} onClose={() => setModal(null)} />}
+        {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(v) => mutate((d) => ({ ...d, vault: d.vault.some((x) => x.id === v.id) ? d.vault.map((x) => x.id === v.id ? v : x) : [...d.vault, v] }), { action: `${db.vault.some((x) => x.id === v.id) ? "updated" : "added"} credentials for ${v.service}`, module: "Passwords" })} onClose={() => setModal(null)} />}
 
         {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={isAdmin ? openAccount : undefined} />}
       </div>
