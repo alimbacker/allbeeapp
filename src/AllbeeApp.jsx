@@ -194,7 +194,7 @@ async function replaceAll(clean) {
 
 /* ── people (profiles / roles) ────────────────────────────────────────── */
 async function fetchTeam() {
-  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version").order("created_at", { ascending: true });
+  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version,approved").order("created_at", { ascending: true });
   if (error) throw new Error(`Loading team: ${error.message}`);
   return data || [];
 }
@@ -2588,9 +2588,32 @@ function Team({ team, me, changeProfile }) {
     const mods = Array.isArray(p.perms?.modules) ? p.perms.modules : [];
     return mods.length ? mods.map((k) => (GRANTABLE_MODULES.find((g) => g[0] === k) || [k, k])[1]).join(", ") : "Personal screens only";
   };
+  const isSuper = me.role === "superadmin";
+  const pending = team.filter((p) => (p.role === "staff" || p.role === "client") && p.approved === false);
+  const roster = team.filter((p) => p.role !== "client");          // clients live in the portal, not the internal roster
+  const approve = (p) => { haptic(10); changeProfile(p.id, { approved: true }); };
+  const reject = (p) => changeProfile(p.id, { approved: false, status: "terminated", active: false });
   return (
     <div className="content">
       <div className="page-head"><h3>Team</h3></div>
+      {isSuper && pending.length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div style={{ padding: "13px 16px", borderBottom: "1px solid var(--border)", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}><Hourglass size={15} /> {pending.length} account{pending.length > 1 ? "s" : ""} awaiting your approval</div>
+          {pending.map((p) => (
+            <div key={p.id} className="item-row">
+              <div className="avatar" style={{ background: avatarColor(p.name), width: 30, height: 30, fontSize: 12 }}>{(p.name || "?")[0]}</div>
+              <div className="item-main">
+                <div className="item-title" style={{ fontSize: 14 }}>{p.name} <span className="badge accent" style={{ marginLeft: 4 }}>{p.role === "client" ? "Client" : "Staff"}</span></div>
+                <div className="item-meta"><span>{p.email}</span>{p.created_at && <span>Signed up {fmtDate(p.created_at.slice(0, 10))}</span>}</div>
+              </div>
+              <div className="row-actions">
+                <button className="btn sm primary" onClick={() => approve(p)}><Check size={13} />Approve</button>
+                <button className="btn sm danger" onClick={() => reject(p)}><X size={13} />Reject</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", marginBottom: 16 }}>
         <div className="card stat"><div className="lbl"><ShieldCheck size={14} /> Partners</div><div className="num">{count("superadmin")}</div></div>
         <div className="card stat"><div className="lbl"><ShieldCheck size={14} /> Admins</div><div className="num">{count("admin")}</div></div>
@@ -2603,7 +2626,7 @@ function Team({ team, me, changeProfile }) {
           <div style={{ overflowX: "auto" }}>
             <table className="tbl">
               <thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Module access</th><th>Joined</th></tr></thead>
-              <tbody>{team.map((p) => {
+              <tbody>{roster.map((p) => {
                 const isSelf = p.id === me.id;
                 const isSuper = p.role === "superadmin";
                 return (
@@ -2660,6 +2683,20 @@ function Blocked({ isDark, name, onSignOut }) {
         <div className="lock-badge" style={{ background: "var(--surface-2)" }}><Hourglass size={28} color="var(--muted)" /></div>
         <h1>Access paused</h1>
         <p>Hi {name}, your account is currently inactive. Please ask an ALLBEE admin to reactivate it.</p>
+        <button className="btn" style={{ marginTop: 8 }} onClick={onSignOut}><LogOut size={15} />Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalPending({ isDark, name, onSignOut }) {
+  return (
+    <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
+      <style>{CSS}</style>
+      <div className="lock-card">
+        <div className="lock-badge" style={{ background: "var(--surface-2)" }}><ShieldCheck size={28} color="var(--muted)" /></div>
+        <h1>Awaiting approval</h1>
+        <p>Thanks {name} — your account has been created. A partner needs to approve it before you can get in. You'll have access as soon as they do.</p>
         <button className="btn" style={{ marginTop: 8 }} onClick={onSignOut}><LogOut size={15} />Sign out</button>
       </div>
     </div>
@@ -3177,7 +3214,7 @@ function PortalPostForm({ initial, onSave, onClose, portalClients }) {
     if (!f.clientId) { setErr("Pick a client."); return; }
     if (!f.title.trim()) { setErr("Add a heading."); return; }
     const person = (portalClients || []).find((p) => p.id === f.clientId);
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), clientName: person?.name || "", title: f.title.trim() });
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), clientName: person?.name || "", title: f.title.trim(), meetingLink: (f.meetingLink || "").trim() });
   };
   return (
     <Modal title={f.id ? "Edit update" : "Post a client update"} onClose={onClose}
@@ -3193,6 +3230,7 @@ function PortalPostForm({ initial, onSave, onClose, portalClients }) {
             <Field label="Status"><select className="select" value={f.status} onChange={(e) => set("status", e.target.value)}>{["Not started", "In progress", "Review", "Completed", "On hold"].map((s) => <option key={s}>{s}</option>)}</select></Field>
           </div>
           <Field label="Message"><textarea className="textarea" value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="What's the latest for this client?" /></Field>
+          <Field label="Meeting link (optional)" hint="Paste a Google Meet / Zoom / Teams link — the client gets a Join button in their portal."><input className="input" value={f.meetingLink || ""} onChange={(e) => set("meetingLink", e.target.value)} placeholder="https://meet.google.com/…" /></Field>
         </>}
     </Modal>
   );
@@ -3204,13 +3242,14 @@ function AnnouncementForm({ initial, onSave, onClose }) {
   const [err, setErr] = useState("");
   const save = () => {
     if (!f.title.trim()) { setErr("Add a headline."); return; }
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim() });
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), meetingLink: (f.meetingLink || "").trim() });
   };
   return (
     <Modal title={f.id ? "Edit announcement" : "New announcement"} onClose={onClose}
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><MegaphoneIcon size={15} />Post</button></>}>
       <Field label="Headline" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Office closed on Friday" /></Field>
       <Field label="Details"><textarea className="textarea" style={{ minHeight: 120 }} value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="The full message…" /></Field>
+      <Field label="Meeting link (optional)" hint="Paste a Google Meet / Zoom / Teams link — everyone gets a Join button."><input className="input" value={f.meetingLink || ""} onChange={(e) => set("meetingLink", e.target.value)} placeholder="https://meet.google.com/…" /></Field>
     </Modal>
   );
 }
@@ -3422,6 +3461,7 @@ function Announcements({ db, mutate, openModal, removeItem, isAdmin, me }) {
                 <div style={{ fontWeight: 700, fontSize: 16 }}>{a.title}</div>
                 {a.body && <div style={{ marginTop: 6, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{a.body}</div>}
                 <div className="item-meta" style={{ marginTop: 8 }}><span>{a.by || "Admin"}</span><span>{fmtDateTime(a.createdAt)}</span>{isAdmin && <span><BadgeCheck size={12} style={{ verticalAlign: -2 }} /> {(a.acks || []).length} acknowledged</span>}</div>
+                {a.meetingLink && <div style={{ marginTop: 8 }}><a className="btn sm primary" href={a.meetingLink} target="_blank" rel="noreferrer"><Link2 size={13} />Join meeting</a></div>}
                 {!isAdmin && ((a.acks || []).includes(me.id)
                   ? <div className="hint-line" style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 5, color: "var(--pos)" }}><BadgeCheck size={13} />You acknowledged this</div>
                   : <div style={{ marginTop: 10 }}><button className="btn sm primary" onClick={() => ack(a)}><Check size={13} />Acknowledge</button></div>)}
@@ -3434,27 +3474,28 @@ function Announcements({ db, mutate, openModal, removeItem, isAdmin, me }) {
   );
 }
 
-function Documents({ db, mutate, openModal, removeItem, isAdmin }) {
+function Documents({ db, mutate, openModal, removeItem, isAdmin, me }) {
   const [cat, setCat] = useState("All");
   const all = [...db.documents].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const list = cat === "All" ? all : all.filter((d) => d.category === cat);
   const del = (d) => removeItem("documents", d, { name: d.title, audit: `deleted document "${d.title}"` });
+  const canManage = (d) => isAdmin || d.ownerId === me?.id;
   return (
     <div className="content">
-      <div className="page-head"><h3>Documents</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button>}</div>
+      <div className="page-head"><h3>Documents</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button></div>
       <div className="toolbar"><div className="seg">{["All", ...DOC_CATEGORIES].map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div></div>
       <div className="card">
-        {list.length === 0 ? <Empty icon={<FileText size={22} color="var(--muted)" />} title="No documents" text={isAdmin ? "Keep shared contracts, templates and brand files (as links) in one place." : "Shared files from your team will show up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button>} />
+        {list.length === 0 ? <Empty icon={<FileText size={22} color="var(--muted)" />} title="No documents" text="Keep shared contracts, templates and brand files (as links) in one place." action={<button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button>} />
           : list.map((d) => (
             <div key={d.id} className="item-row">
               <div className="empty" style={{ padding: 0 }}><div className="ic" style={{ width: 40, height: 40, margin: 0 }}><FileText size={18} color="var(--muted)" /></div></div>
               <div className="item-main">
                 <div className="item-title"><a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", textDecoration: "none" }}>{d.title}</a></div>
-                <div className="item-meta"><span className="tag">{d.category}</span>{d.notes && <span>{d.notes}</span>}<span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div>
+                <div className="item-meta"><span className="tag">{d.category}</span>{d.owner && <span>by {d.owner}</span>}{d.notes && <span>{d.notes}</span>}<span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div>
               </div>
               <div className="row-actions" style={{ alignItems: "center" }}>
                 <a className="btn sm" href={d.url} target="_blank" rel="noreferrer"><ExternalLink size={13} />Open</a>
-                {isAdmin && <><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "document", initial: d })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete document?", body: `Delete "${d.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(d) })}><Trash2 size={14} /></button></>}
+                {canManage(d) && <><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "document", initial: d })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete document?", body: `Delete "${d.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(d) })}><Trash2 size={14} /></button></>}
               </div>
             </div>
           ))}
@@ -3621,6 +3662,7 @@ function PortalPosts({ db, mutate, openModal, removeItem, portalClients }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span className="item-title">{p.title}</span><span className={"badge " + statusTone(p.status)}>{p.status}</span></div>
                 <div className="item-meta"><span><Building2 size={12} style={{ verticalAlign: -2 }} /> {p.clientName}</span><span>{fmtDateTime(p.createdAt)}</span></div>
                 {p.body && <div className="sub" style={{ marginTop: 4 }}>{p.body}</div>}
+                {p.meetingLink && <div style={{ marginTop: 6 }}><a className="btn sm primary" href={p.meetingLink} target="_blank" rel="noreferrer"><Link2 size={13} />Join meeting</a></div>}
               </div>
               <div className="row-actions">
                 <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "portalPost", initial: p })}><Pencil size={14} /></button>
@@ -3658,6 +3700,7 @@ function ClientPortal({ db, profile, signOut, isDark }) {
               <div key={p.id} style={{ borderLeft: "3px solid var(--primary)", paddingLeft: 14 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700 }}>{p.title}</span><span className={"badge " + statusTone(p.status)}>{p.status}</span></div>
                 {p.body && <div style={{ marginTop: 5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{p.body}</div>}
+                {p.meetingLink && <div style={{ marginTop: 8 }}><a className="btn sm primary" href={p.meetingLink} target="_blank" rel="noreferrer"><Link2 size={13} />Join meeting</a></div>}
                 <div className="hint-line" style={{ fontSize: 11.5, marginTop: 5 }}>{fmtDateTime(p.createdAt)}</div>
               </div>
             ))}</div>}
@@ -3689,7 +3732,7 @@ export default function App() {
   const [team, setTeam] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncError, setSyncError] = useState(null);
-  const [isDark, setIsDark] = useState(true);
+  const [isDark, setIsDark] = useState(() => { try { const v = localStorage.getItem("allbee_theme"); return v ? v === "dark" : false; } catch { return false; } });
   const [route, setRoute] = useState("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenu, setUserMenu] = useState(false);
@@ -3948,6 +3991,9 @@ export default function App() {
   if (profile === undefined) return <Loading note="Signing you in…" />;
   if (profile && profile.active === false)
     return <Blocked isDark={isDark} name={currentUser} onSignOut={signOut} />;
+  // new staff & client sign-ups wait for a partner to approve them
+  if (profile && (role === "staff" || role === "client") && profile.approved === false)
+    return <ApprovalPending isDark={isDark} name={currentUser} onSignOut={signOut} />;
   // portal clients get their own surface and skip the internal profile/T&C gates
   if (role === "client") {
     if (loading || !db) return <Loading note="Loading your portal…" />;
@@ -4006,7 +4052,7 @@ export default function App() {
       case "planned": return <Planned db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} openIncome={openIncome} canFinance={canFinance} />;
       case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
-      case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "chat": return <Chat db={db} mutate={mutate} me={me} />;
       case "performance": return <Performance db={db} team={team} />;
@@ -4041,7 +4087,7 @@ export default function App() {
               </div>
             ))}
             <div className="sidebar-foot">
-              <div className="navitem" onClick={() => setIsDark(!isDark)}>{isDark ? <Sun size={18} /> : <Moon size={18} />} {isDark ? "Light mode" : "Dark mode"}</div>
+              <div className="navitem" onClick={() => { const nd = !isDark; setIsDark(nd); try { localStorage.setItem("allbee_theme", nd ? "dark" : "light"); } catch { /* ignore */ } }}>{isDark ? <Sun size={18} /> : <Moon size={18} />} {isDark ? "Light mode" : "Dark mode"}</div>
             </div>
           </aside>
 
