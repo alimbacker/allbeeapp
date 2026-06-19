@@ -7,6 +7,7 @@ import {
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
   ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
+  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -27,15 +28,66 @@ const INCOME_CATEGORIES = ["Project", "Course", "Marketing", "Consulting", "Othe
 const EXPENSE_CATEGORIES = ["Office Rent", "Internet", "Electricity", "Marketing", "Software", "Travel", "Other"];
 const LEAVE_TYPES = ["Casual", "Sick", "Earned", "Unpaid"];
 
+// Phase 3–6 domain vocab
+const LEAD_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"];
+const LEAD_SOURCES = ["Referral", "Instagram", "Facebook", "Website", "Walk-in", "Cold call", "Other"];
+const QUOTE_STATUS = ["Draft", "Sent", "Accepted", "Rejected"];
+const DOC_CATEGORIES = ["Contract", "Invoice", "Design", "Brand", "Report", "Other"];
+const KB_CATEGORIES = ["Policy", "How-to", "FAQ", "Onboarding", "Tools", "Other"];
+const EXPENSE_RECURRENCE = ["One-time", "Monthly", "Quarterly", "Yearly"];
+const REWARD_KINDS = ["Star performer", "On-time hero", "Team player", "Goal smashed", "Bonus"];
+const VAULT_CATEGORIES = ["Social", "Website", "Hosting", "Email", "Domain", "Banking", "Tools", "Other"];
+
 // Recently Deleted (recycle bin): which collections support soft-delete + restore,
 // the human label shown for each, and how long items survive before auto-cleanup.
 const RECYCLE_TTL_DAYS = 60;
 const MODULE_LABEL = {
   transactions: "Accounts", withdrawals: "Withdrawals", tasks: "Tasks",
   projects: "Projects", students: "Courses", marketing: "Marketing", concepts: "Concepts",
+  leads: "Leads", clients: "Clients", quotations: "Quotations", planned: "Planned expenses",
+  announcements: "Announcements", documents: "Documents", knowledge: "Knowledge base",
+  rewards: "Rewards", vault: "Passwords", portal_posts: "Client updates",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
+
+/* ── roles & access (Phase 3 — five levels) ───────────────────────────────
+   superadmin (Haji & Alim) · admin · accountant · staff · intern.
+   The money (Share & accounts, Withdrawals) is superadmin + accountant only;
+   a plain admin runs the team and business but never sees the partner split. */
+const ROLE_LABEL = { superadmin: "Super admin", admin: "Admin", accountant: "Accountant", staff: "Staff", intern: "Intern" };
+const ROLE_OPTIONS = ["admin", "accountant", "staff", "intern"]; // an admin may assign these — never superadmin
+const STATUS_LABEL = { active: "Active", on_leave: "On leave", suspended: "Suspended", resigned: "Resigned", terminated: "Terminated" };
+const STATUS_OPTIONS = ["active", "on_leave", "suspended", "resigned", "terminated"];
+// statuses that revoke sign-in (the row's `active` flag is set from this)
+const STATUS_ACTIVE = { active: true, on_leave: true, suspended: false, resigned: false, terminated: false };
+// business modules an admin can grant to an individual staff member, one by one
+const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"]];
+// who must accept the Terms & Conditions before they can use the app
+const TNC_ROLES = ["accountant", "staff", "intern"];
+
+const isSuperRole = (r) => r === "superadmin";
+const isAdminRole = (r) => r === "superadmin" || r === "admin";        // management level
+const canFinanceRole = (r) => r === "superadmin" || r === "accountant"; // the money
+
+// Which nav entries a user can see, derived from their role + granted modules.
+function navAllowed(tag, role, perms) {
+  const sa = isSuperRole(role), adm = isAdminRole(role);
+  const acc = role === "accountant", staff = role === "staff", intern = role === "intern";
+  if (tag === "everyone") return true;               // dashboard
+  if (tag === "work") return adm || staff || intern;  // tasks, attendance, daily updates
+  if (tag === "leave") return adm || staff;           // leave (not interns, not accountant)
+  if (tag === "finance") return sa || acc;            // share & accounts, withdrawals, planned
+  if (tag === "admin") return adm;                    // team, progress, recycle, audit, settings
+  if (tag === "collab") return true;                  // announcements, chat, docs, knowledge (any internal user)
+  if (tag === "vault") return sa;                     // password vault (partners only for now)
+  if (tag === "insight") return adm;                  // performance, rewards
+  if (tag.startsWith("perm:")) {
+    const mod = tag.slice(5);
+    return adm || (staff && Array.isArray(perms?.modules) && perms.modules.includes(mod));
+  }
+  return adm;
+}
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -74,13 +126,20 @@ const sameMonth = (iso, ref = new Date()) => {
    We load every row into the in-memory shape, and on each change we persist
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
-const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle"];
+const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts"];
 
 async function fetchAll() {
   const db = emptyDB();
   await Promise.all(TABLES.map(async (t) => {
     const { data, error } = await supabase.from(t).select("id,data");
-    if (error) throw new Error(`Loading ${t}: ${error.message}`);
+    if (error) {
+      // Tolerate a table that hasn't been migrated yet so a partial deploy
+      // (new app, old schema) doesn't brick the whole workspace. Real errors
+      // (RLS, auth, network) still surface.
+      if (/does not exist|find the table|schema cache|PGRST205/i.test(error.message || "")) { db[t] = []; return; }
+      throw new Error(`Loading ${t}: ${error.message}`);
+    }
     db[t] = (data || [])
       .map((r) => r.data)
       .sort((a, b) => (a?.createdAt || a?.ts || 0) - (b?.createdAt || b?.ts || 0));
@@ -124,10 +183,49 @@ async function replaceAll(clean) {
 
 /* ── people (profiles / roles) ────────────────────────────────────────── */
 async function fetchTeam() {
-  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at").order("created_at", { ascending: true });
+  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version").order("created_at", { ascending: true });
   if (error) throw new Error(`Loading team: ${error.message}`);
   return data || [];
 }
+// The live Terms & Conditions + version live in app_config; staff can read only
+// the tnc_* keys (the admin sign-up code is locked away by row-level security).
+async function fetchConfig() {
+  const { data, error } = await supabase.from("app_config").select("key,value").in("key", ["tnc_version", "tnc_body"]);
+  if (error) return {}; // non-fatal — the T&C gate simply won't apply
+  const out = {};
+  for (const r of data || []) out[r.key] = r.value;
+  return out;
+}
+async function saveConfig(patch) {
+  const rows = Object.entries(patch).map(([key, value]) => ({ key, value: value == null ? "" : String(value) }));
+  const { error } = await supabase.from("app_config").upsert(rows, { onConflict: "key" });
+  if (error) throw new Error(error.message);
+}
+
+// Global, never-reused task number (atomic on the server).
+async function nextTaskNumber() {
+  const { data, error } = await supabase.rpc("next_task_number");
+  if (error) return null;
+  return typeof data === "number" ? data : Number(data);
+}
+// Financial period locks ('YYYY-MM'). Partners lock/unlock; the DB blocks writes
+// to a locked month for everyone else.
+async function fetchLocks() {
+  const { data, error } = await supabase.from("fin_locks").select("period").order("period", { ascending: true });
+  if (error) return [];
+  return (data || []).map((r) => r.period);
+}
+async function lockPeriod(period, who) {
+  const { error } = await supabase.from("fin_locks").upsert({ period, locked_by: who || null }, { onConflict: "period" });
+  if (error) throw new Error(error.message);
+}
+async function unlockPeriod(period) {
+  const { error } = await supabase.from("fin_locks").delete().eq("period", period);
+  if (error) throw new Error(error.message);
+}
+const periodOf = (iso) => (iso ? String(iso).slice(0, 7) : todayISO().slice(0, 7)); // 'YYYY-MM'
+const fmtPeriod = (p) => { const [y, m] = (p || "").split("-"); const d = new Date(Number(y), Number(m) - 1, 1); return isNaN(d) ? p : d.toLocaleDateString("en-IN", { month: "long", year: "numeric" }); };
+const fmtDateTime = (ts) => { const d = new Date(ts); return isNaN(d) ? "—" : d.toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit", hour12: true }); };
 // Make sure the signed-in user has a profile row (covers accounts made before
 // the database trigger existed). Defaults to a staff member; an admin can change
 // the role later from the Team screen.
@@ -158,10 +256,13 @@ const onApprovedLeave = (db, userId, dateISO) =>
 const attendanceFor = (db, userId, dateISO) => db.attendance.find((a) => a.userId === userId && a.date === dateISO) || null;
 
 const emptyDB = () => ({
-  version: 2,
+  version: 3,
   transactions: [], withdrawals: [], tasks: [], projects: [],
   students: [], marketing: [], concepts: [], audit: [],
   attendance: [], leave: [], updates: [], recycle: [],
+  leads: [], clients: [], quotations: [], planned: [],
+  announcements: [], documents: [], knowledge: [], chat: [],
+  rewards: [], vault: [], portal_posts: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -175,6 +276,7 @@ function balances(db) {
     else { Haji -= h; Alim -= m; }
   }
   for (const w of db.withdrawals) {
+    if (w.status === "pending" || w.status === "rejected") continue; // only approved withdrawals move money
     if (w.user === "Haji") Haji -= Number(w.amount) || 0;
     else Alim -= Number(w.amount) || 0;
   }
@@ -197,7 +299,7 @@ function ledgerFor(db, user) {
       notes: t.notes || "",
     });
   }
-  for (const w of db.withdrawals.filter((w) => w.user === user)) {
+  for (const w of db.withdrawals.filter((w) => w.user === user && w.status !== "pending" && w.status !== "rejected")) {
     events.push({
       ts: w.createdAt || 0, date: w.date, client: "—", project: "Withdrawal", category: "Withdrawal", type: "Withdrawal",
       income: null, expense: null, pct: 100, credited: 0, debited: Number(w.amount) || 0, notes: w.notes || "",
@@ -525,6 +627,33 @@ table.tbl tr:hover td { background:var(--surface-2); }
 .ttl-link { background:none; border:none; padding:0; margin:0; font:inherit; font-weight:700; font-size:14.5px; color:var(--ink);
   cursor:pointer; text-align:left; }
 .ttl-link:hover { color:var(--primary); text-decoration:underline; }
+
+/* ── Phase 3: roles, access gates, lifecycle ───────────────────────────── */
+.role-badge.superadmin { background:rgba(234,164,23,.18); color:var(--accent); }
+.role-badge.accountant { background:var(--pos-soft); color:var(--pos); }
+.role-badge.intern { background:var(--surface-2); color:var(--muted); }
+
+/* first-login profile + terms gates reuse the lock card */
+.gate-card { max-width:480px; text-align:left; }
+.gate-card h1 { font-size:22px; text-align:center; }
+.gate-card > p { text-align:center; }
+.gate-foot { display:flex; gap:10px; margin-top:18px; }
+.tnc-scroll { max-height:44vh; overflow:auto; border:1px solid var(--border); border-radius:12px;
+  padding:14px 16px; background:var(--surface-2); font-size:13.5px; line-height:1.6; white-space:pre-wrap; }
+.checkrow { display:flex; align-items:flex-start; gap:10px; font-size:13.5px; margin-top:16px; cursor:pointer; line-height:1.45; }
+.checkrow input { margin-top:2px; width:16px; height:16px; flex:none; }
+
+/* per-staff module grants */
+.perm-list { display:flex; flex-direction:column; gap:8px; }
+.perm-item { display:flex; align-items:center; gap:11px; padding:11px 13px; border:1px solid var(--border);
+  border-radius:10px; background:var(--surface-2); font-size:14px; font-weight:600; cursor:pointer; }
+.perm-item input { width:16px; height:16px; }
+
+/* employee lifecycle */
+.status-pill { font-size:11px; font-weight:700; padding:2px 9px; border-radius:999px; white-space:nowrap; }
+.status-active { background:var(--pos-soft); color:var(--pos); }
+.status-on_leave { background:rgba(234,164,23,.16); color:var(--accent); }
+.status-suspended, .status-resigned, .status-terminated { background:var(--neg-soft); color:var(--neg); }
 `;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -900,54 +1029,66 @@ function ConceptForm({ initial, onSave, onClose }) {
 /* ══════════════════════════════════════════════════════════════════════
    PAGES
 ══════════════════════════════════════════════════════════════════════ */
-function Dashboard({ db, bal, go, openBalance }) {
+function Dashboard({ db, bal, go, openBalance, showMoney = true, showOps = true }) {
   const m = monthStats(db);
   const pending = db.tasks.filter((t) => t.status !== "Completed").length;
   const active = db.projects.filter((p) => p.stage !== "Completed").length;
   const recent = [...db.audit].slice(-8).reverse();
+  const stats = [];
+  if (showMoney) {
+    stats.push(<div key="rev" className="card stat"><div className="lbl"><TrendingUp size={14} /> Monthly revenue</div><div className="num mono pos-txt">{money(m.rev)}</div></div>);
+    stats.push(<div key="exp" className="card stat"><div className="lbl"><TrendingUp size={14} style={{ transform: "scaleY(-1)" }} /> Monthly expenses</div><div className="num mono neg-txt">{money(m.exp)}</div></div>);
+  }
+  if (showOps) {
+    stats.push(<div key="tasks" className="card stat" style={{ cursor: "pointer" }} onClick={() => go("tasks")}><div className="lbl"><ListTodo size={14} /> Pending tasks</div><div className="num">{pending}</div></div>);
+    stats.push(<div key="proj" className="card stat" style={{ cursor: "pointer" }} onClick={() => go("projects")}><div className="lbl"><FolderKanban size={14} /> Active projects</div><div className="num">{active}</div></div>);
+  }
   return (
     <div className="content">
       <div className="page-head"><h3>Dashboard</h3></div>
 
-      <div className="card stat" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-        <div><div className="lbl"><Wallet size={14} /> Company balance</div>
-          <div className="num mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div>
-          <div className="sub">Haji balance + Alim balance</div></div>
-        <span style={{ flex: 1, minWidth: 20 }} />
-        <div style={{ minWidth: 220 }}>
-          <SplitBar
-            h={bal.company > 0 ? Math.max(0, Math.round((bal.Haji / bal.company) * 100)) : 50}
-            a={bal.company > 0 ? Math.max(0, Math.round((bal.Alim / bal.company) * 100)) : 50}
-            legend={false} />
-          <div className="split-legend" style={{ marginTop: 8 }}>
-            <span><span className="dot" style={{ background: "var(--haji)" }} /> Haji {money(bal.Haji)}</span>
-            <span><span className="dot" style={{ background: "var(--alim)" }} /> Alim {money(bal.Alim)}</span>
+      {showMoney && (
+        <div className="card stat" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
+          <div><div className="lbl"><Wallet size={14} /> Company balance</div>
+            <div className="num mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div>
+            <div className="sub">Haji balance + Alim balance</div></div>
+          <span style={{ flex: 1, minWidth: 20 }} />
+          <div style={{ minWidth: 220 }}>
+            <SplitBar
+              h={bal.company > 0 ? Math.max(0, Math.round((bal.Haji / bal.company) * 100)) : 50}
+              a={bal.company > 0 ? Math.max(0, Math.round((bal.Alim / bal.company) * 100)) : 50}
+              legend={false} />
+            <div className="split-legend" style={{ marginTop: 8 }}>
+              <span><span className="dot" style={{ background: "var(--haji)" }} /> Haji {money(bal.Haji)}</span>
+              <span><span className="dot" style={{ background: "var(--alim)" }} /> Alim {money(bal.Alim)}</span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 14 }}>
-        {USERS.map((u) => (
-          <div key={u} className="card balance-card" onClick={() => openBalance(u)}>
-            <div className="stripe" style={{ background: avatarColor(u) }} />
-            <div className="who"><span className="dot" style={{ background: avatarColor(u) }} /> {u} balance</div>
-            <div className="amt mono" style={{ color: bal[u] < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal[u])}</div>
-            <div className="hint">View full breakdown <ChevronRight size={13} /></div>
-          </div>
-        ))}
-      </div>
+      {showMoney && (
+        <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 14 }}>
+          {USERS.map((u) => (
+            <div key={u} className="card balance-card" onClick={() => openBalance(u)}>
+              <div className="stripe" style={{ background: avatarColor(u) }} />
+              <div className="who"><span className="dot" style={{ background: avatarColor(u) }} /> {u} balance</div>
+              <div className="amt mono" style={{ color: bal[u] < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal[u])}</div>
+              <div className="hint">View full breakdown <ChevronRight size={13} /></div>
+            </div>
+          ))}
+        </div>
+      )}
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(4,1fr)", marginBottom: 18 }}>
-        <div className="card stat"><div className="lbl"><TrendingUp size={14} /> Monthly revenue</div><div className="num mono pos-txt">{money(m.rev)}</div></div>
-        <div className="card stat"><div className="lbl"><TrendingUp size={14} style={{ transform: "scaleY(-1)" }} /> Monthly expenses</div><div className="num mono neg-txt">{money(m.exp)}</div></div>
-        <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("tasks")}><div className="lbl"><ListTodo size={14} /> Pending tasks</div><div className="num">{pending}</div></div>
-        <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("projects")}><div className="lbl"><FolderKanban size={14} /> Active projects</div><div className="num">{active}</div></div>
-      </div>
+      {stats.length > 0 && (
+        <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", marginBottom: 18 }}>
+          {stats}
+        </div>
+      )}
 
       <div className="card">
         <div style={{ padding: "15px 18px", borderBottom: "1px solid var(--border)", fontWeight: 700 }}>Recent activity</div>
         {recent.length === 0 ? (
-          <Empty icon={<ScrollText size={22} color="var(--muted)" />} title="Nothing here yet" text="Your activity feed fills up as you and your partner work." />
+          <Empty icon={<ScrollText size={22} color="var(--muted)" />} title="Nothing here yet" text="Your activity feed fills up as the team works." />
         ) : recent.map((a) => (
           <div key={a.id} className="item-row">
             <div className="avatar" style={{ background: avatarColor(a.user), width: 28, height: 28, fontSize: 11 }}>{a.user[0]}</div>
@@ -1330,9 +1471,12 @@ function AccountFull({ db, user, goBack }) {
   );
 }
 
-function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
+function Accounts({ db, bal, mutate, openModal, openBalance, removeItem, locks = [], lockPeriod, unlockPeriod, isSuper, currentUser }) {
   const [view, setView] = useState("all");
   const [q, setQ] = useState("");
+  const thisPeriod = todayISO().slice(0, 7);
+  const lockedThis = locks.includes(thisPeriod);
+  const doLock = async (p, on) => { try { on ? await lockPeriod(p, currentUser) : await unlockPeriod(p); } catch (e) { alert(e.message || "Couldn't update the lock."); } };
   const list = useMemo(() => {
     let r = [...db.transactions].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
     if (view !== "all") r = r.filter((t) => t.kind === view);
@@ -1348,6 +1492,26 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
         <button className="btn" onClick={() => openModal({ type: "expense" })}><Plus size={16} />Add expense</button>
         <button className="btn primary" onClick={() => openModal({ type: "income" })}><Plus size={16} />Add income</button>
       </div>
+
+      {lockedThis && <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginBottom: 14 }}><LockIcon size={15} /> {fmtPeriod(thisPeriod)} is locked — income, expenses and withdrawals dated this month are frozen{isSuper ? "." : " until a partner unlocks it."}</div>}
+
+      {isSuper && (
+        <div className="card stat" style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <LockIcon size={16} color="var(--muted)" />
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <div style={{ fontWeight: 700 }}>Financial locking</div>
+              <div className="hint-line" style={{ fontSize: 12 }}>Lock a closed month to freeze its books. Only partners can lock or unlock.</div>
+            </div>
+            <button className={"btn sm " + (lockedThis ? "" : "primary")} onClick={() => doLock(thisPeriod, !lockedThis)}>
+              {lockedThis ? <><Unlock size={13} />Unlock {fmtPeriod(thisPeriod)}</> : <><LockIcon size={13} />Lock {fmtPeriod(thisPeriod)}</>}
+            </button>
+          </div>
+          {locks.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+            {locks.map((p) => <span key={p} className="tag" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><LockIcon size={11} />{fmtPeriod(p)}<button className="iconbtn" style={{ width: 20, height: 20 }} onClick={() => doLock(p, false)} title="Unlock"><X size={11} /></button></span>)}
+          </div>}
+        </div>
+      )}
 
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 16 }}>
         <div className="card balance-card" onClick={() => openBalance("Haji")}><div className="stripe" style={{ background: "var(--haji)" }} />
@@ -1399,15 +1563,22 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem }) {
   );
 }
 
-function Withdrawals({ db, bal, mutate, openModal, removeItem }) {
+function Withdrawals({ db, bal, mutate, openModal, removeItem, isSuper, currentUser }) {
   const list = [...db.withdrawals].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : b.createdAt - a.createdAt));
   const del = (w) => removeItem("withdrawals", w, { name: `Withdrawal ${money(w.amount)} · ${w.user}`, audit: `deleted a withdrawal of ${money(w.amount)}` });
+  const statusOf = (w) => w.status || "approved"; // legacy rows (no status) already moved money
+  const tone = (s) => s === "approved" ? "pos" : s === "rejected" ? "neg" : "pri";
+  const setStatus = (w, s) => mutate((d) => ({ ...d, withdrawals: d.withdrawals.map((x) => x.id === w.id ? { ...x, status: s, approvedBy: currentUser, approvedAt: Date.now() } : x) }),
+    { action: `${s === "approved" ? "approved" : "rejected"} withdrawal of ${money(w.amount)} for ${w.user}`, module: "Withdrawals" });
+  const pending = list.filter((w) => statusOf(w) === "pending").length;
   return (
     <div className="content">
       <div className="page-head"><h3>Withdrawals</h3><span className="spacer" />
         <button className="btn primary" onClick={() => openModal({ type: "withdraw" })}><Plus size={16} />Record withdrawal</button></div>
 
-      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 16 }}>
+      {pending > 0 && <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><Hourglass size={15} /> {pending} withdrawal{pending > 1 ? "s" : ""} awaiting a partner's approval. Only approved withdrawals affect the balances.</div>}
+
+      <div className="cards-grid" style={{ gridTemplateColumns: "1fr 1fr", margin: "16px 0" }}>
         {USERS.map((u) => (
           <div key={u} className="card stat"><div className="lbl"><span className="dot" style={{ background: avatarColor(u) }} /> {u} available</div>
             <div className="num mono" style={{ color: bal[u] < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal[u])}</div>
@@ -1417,20 +1588,27 @@ function Withdrawals({ db, bal, mutate, openModal, removeItem }) {
 
       <div className="card">
         {list.length === 0 ? (
-          <Empty icon={<ArrowDownToLine size={22} color="var(--muted)" />} title="No withdrawals yet" text="A partner can withdraw up to their current balance. Expense allocation can later push a balance negative — future income settles it automatically." />
+          <Empty icon={<ArrowDownToLine size={22} color="var(--muted)" />} title="No withdrawals yet" text="A partner can withdraw up to their current balance. Each withdrawal needs a partner's approval before it moves money." />
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="tbl">
-              <thead><tr><th>Date</th><th>Partner</th><th className="num-cell">Amount</th><th>Notes</th><th></th></tr></thead>
-              <tbody>{list.map((w) => (
-                <tr key={w.id}>
+              <thead><tr><th>Date</th><th>Partner</th><th className="num-cell">Amount</th><th>Status</th><th>Notes</th><th></th></tr></thead>
+              <tbody>{list.map((w) => {
+                const st = statusOf(w);
+                return (
+                <tr key={w.id} style={st === "rejected" ? { opacity: 0.55 } : undefined}>
                   <td className="mono" style={{ whiteSpace: "nowrap" }}>{fmtDate(w.date)}</td>
                   <td><span className="badge" style={{ background: "var(--surface-2)" }}><span className="dot" style={{ background: avatarColor(w.user), display: "inline-block", marginRight: 5 }} />{w.user}</span></td>
                   <td className="num-cell mono neg-txt" style={{ fontWeight: 700 }}>{money(-w.amount)}</td>
+                  <td><span className={"badge " + tone(st)} style={{ textTransform: "capitalize" }}>{st}</span></td>
                   <td style={{ color: "var(--muted)", fontSize: 13 }}>{w.notes || "—"}</td>
-                  <td><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete withdrawal?", body: `Remove this ${money(w.amount)} withdrawal for ${w.user}?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(w) })}><Trash2 size={14} /></button></td>
+                  <td><div className="row-actions">
+                    {isSuper && st !== "approved" && <button className="btn sm primary" onClick={() => setStatus(w, "approved")} title="Approve"><Check size={13} /></button>}
+                    {isSuper && st !== "rejected" && <button className="btn sm danger" onClick={() => setStatus(w, "rejected")} title="Reject"><X size={13} /></button>}
+                    <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete withdrawal?", body: `Remove this ${money(w.amount)} withdrawal for ${w.user}?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(w) })}><Trash2 size={14} /></button>
+                  </div></td>
                 </tr>
-              ))}</tbody>
+              ); })}</tbody>
             </table>
           </div>
         )}
@@ -1447,8 +1625,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
   const list = useMemo(() => {
     let r = [...db.tasks].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : (t.assignedTo === currentUser || t.assignedTo === COMBINED));
-    if (filter === "active") r = r.filter((t) => t.status === "Created" || t.status === "Accepted");
-    else if (filter === "progress") r = r.filter((t) => t.status === "In Progress");
+    if (filter === "active") r = r.filter((t) => t.status !== "Completed");
     else if (filter === "done") r = r.filter((t) => t.status === "Completed");
     return r;
   }, [db.tasks, filter, scope, isAdmin, currentUser]);
@@ -1479,7 +1656,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
       <div className="page-head"><h3>{isAdmin ? "Tasks" : "My tasks"}</h3><span className="spacer" />
         <button className="btn primary" onClick={() => openModal({ type: "task" })}><Plus size={16} />New task</button></div>
       <div className="toolbar">
-        <div className="seg">{[["active", "Active"], ["progress", "In Progress"], ["done", "Completed"], ["all", "All"]].map(([k, l]) => <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}</div>
+        <div className="seg">{[["active", "Active"], ["done", "Completed"], ["all", "All"]].map(([k, l]) => <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}</div>
         {!isAdmin && <div className="seg">{[["mine", "Assigned to me"], ["assigned", "I assigned"]].map(([k, l]) => <button key={k} className={scope === k ? "on" : ""} onClick={() => setScope(k)}>{l}</button>)}</div>}
       </div>
 
@@ -1495,6 +1672,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
             <div key={t.id} className="item-row">
               <div className="item-main">
                 <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  {t.num != null && <span className="badge mono" style={{ fontWeight: 700 }}>#{t.num}</span>}
                   <button className="ttl-link" onClick={() => openTask(t.id)}>{t.title}</button>
                   <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
                   {t.priority && <span className={"badge " + priorityTone(t.priority)}>{t.priority}</span>}
@@ -1623,6 +1801,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
       <button className="backlink" onClick={goBack}><ArrowLeft size={15} />Back to tasks</button>
       <div className="detail-head">
         <div style={{ flex: 1, minWidth: 220 }}>
+          {t.num != null && <div className="hint-line mono" style={{ fontSize: 12, fontWeight: 700, letterSpacing: ".5px" }}>TASK #{t.num}</div>}
           <h3>{t.title}</h3>
           <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
             <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
@@ -1780,13 +1959,17 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
   );
 }
 
-function Projects({ db, mutate, openModal, openIncome, removeItem }) {
+function Projects({ db, mutate, openModal, openIncome, removeItem, canFinance, isAdmin }) {
   const list = [...db.projects].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const setStage = (p, stage) => mutate((d) => ({ ...d, projects: d.projects.map((x) => x.id === p.id ? { ...x, stage } : x) }), { action: `set "${p.name}" to ${stage}`, module: "Projects" });
+  const appr = (p) => p.approvalStatus || "approved"; // legacy projects count as approved
+  const setApproval = (p, s) => mutate((d) => ({ ...d, projects: d.projects.map((x) => x.id === p.id ? { ...x, approvalStatus: s, approvedAt: Date.now() } : x) }), { action: `${s === "approved" ? "approved" : "rejected"} project "${p.name}"`, module: "Projects" });
   const del = (p) => removeItem("projects", p, { name: p.name, audit: `deleted project "${p.name}"` });
+  const pending = isAdmin ? list.filter((p) => appr(p) === "pending").length : 0;
   return (
     <div className="content">
       <div className="page-head"><h3>Projects</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "project" })}><Plus size={16} />New project</button></div>
+      {pending > 0 && <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginBottom: 14 }}><Hourglass size={15} /> {pending} project{pending > 1 ? "s" : ""} submitted by staff awaiting your approval.</div>}
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
         {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<FolderKanban size={22} color="var(--muted)" />} title="No projects yet" text="Track websites, apps and software from Lead all the way to Completed." action={<button className="btn primary" onClick={() => openModal({ type: "project" })}><Plus size={16} />New project</button>} /></div>
           : list.map((p) => (
@@ -1795,10 +1978,13 @@ function Projects({ db, mutate, openModal, openIncome, removeItem }) {
                 <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div><div className="sub">{p.client || "No client"} · {p.type}</div></div>
                 <div className="mono" style={{ fontWeight: 700 }}>{money(p.cost)}</div>
               </div>
+              {appr(p) !== "approved" && <div><span className={"badge " + (appr(p) === "rejected" ? "neg" : "accent")}>{appr(p) === "rejected" ? "Rejected" : "Awaiting approval"}</span>{p.ownerName && <span className="hint-line" style={{ fontSize: 11, marginLeft: 8 }}>by {p.ownerName}</span>}</div>}
               <select className="select" value={p.stage} onChange={(e) => setStage(p, e.target.value)}>{PROJECT_STAGES.map((s) => <option key={s}>{s}</option>)}</select>
               <div className="item-meta">{p.start && <span>Start {fmtDate(p.start)}</span>}{p.expected && <span>Due {fmtDate(p.expected)}</span>}</div>
-              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
-                <button className="btn sm primary" onClick={() => openIncome({ client: p.client, project: p.name, amount: p.cost, category: "Project" })}>Record income</button>
+              <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
+                {isAdmin && appr(p) !== "approved" && <button className="btn sm primary" onClick={() => setApproval(p, "approved")}><Check size={13} />Approve</button>}
+                {isAdmin && appr(p) === "pending" && <button className="btn sm danger" onClick={() => setApproval(p, "rejected")}><X size={13} />Reject</button>}
+                {canFinance && <button className="btn sm primary" onClick={() => openIncome({ client: p.client, project: p.name, amount: p.cost, category: "Project" })}>Record income</button>}
                 <button className="btn sm" onClick={() => openModal({ type: "project", initial: p })}><Pencil size={13} /></button>
                 <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete project?", body: `Delete "${p.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>
               </div>
@@ -1809,7 +1995,7 @@ function Projects({ db, mutate, openModal, openIncome, removeItem }) {
   );
 }
 
-function Courses({ db, mutate, openModal, openIncome, removeItem }) {
+function Courses({ db, mutate, openModal, openIncome, removeItem, canFinance }) {
   const list = [...db.students].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const del = (s) => removeItem("students", s, { name: s.name, audit: `removed student ${s.name}` });
   return (
@@ -1826,7 +2012,7 @@ function Courses({ db, mutate, openModal, openIncome, removeItem }) {
                 <td className="num-cell mono">{money(s.fee)}</td>
                 <td><span className={"badge " + (s.paymentStatus === "Paid" ? "pos" : s.paymentStatus === "Partial" ? "accent" : "neg")}>{s.paymentStatus}</span></td>
                 <td><div className="row-actions">
-                  <button className="btn sm primary" onClick={() => openIncome({ client: s.name, project: s.course || "Course fee", amount: s.fee, category: "Course", source: { kind: "student", id: s.id } })}>Record fee</button>
+                  {canFinance && <button className="btn sm primary" onClick={() => openIncome({ client: s.name, project: s.course || "Course fee", amount: s.fee, category: "Course", source: { kind: "student", id: s.id } })}>Record fee</button>}
                   <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "student", initial: s })}><Pencil size={14} /></button>
                   <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Remove student?", body: `Remove ${s.name}?`, note: "They move to Recently deleted — restore within 60 days.", onConfirm: () => del(s) })}><Trash2 size={14} /></button>
                 </div></td>
@@ -1838,7 +2024,7 @@ function Courses({ db, mutate, openModal, openIncome, removeItem }) {
   );
 }
 
-function Marketing({ db, mutate, openModal, openIncome, removeItem }) {
+function Marketing({ db, mutate, openModal, openIncome, removeItem, canFinance }) {
   const list = [...db.marketing].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const del = (m) => removeItem("marketing", m, { name: m.client, audit: `removed marketing client ${m.client}` });
   return (
@@ -1856,7 +2042,7 @@ function Marketing({ db, mutate, openModal, openIncome, removeItem }) {
                 </div>
                 <div><span className={"badge " + due.tone}>{due.label}</span></div>
                 <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
-                  <button className="btn sm primary" onClick={() => openIncome({ client: m.client, project: (m.plan || "Marketing") + " — monthly", amount: m.monthlyFee, category: "Marketing", source: { kind: "marketing", id: m.id } })}>Record payment</button>
+                  {canFinance && <button className="btn sm primary" onClick={() => openIncome({ client: m.client, project: (m.plan || "Marketing") + " — monthly", amount: m.monthlyFee, category: "Marketing", source: { kind: "marketing", id: m.id } })}>Record payment</button>}
                   <button className="btn sm" onClick={() => openModal({ type: "marketing", initial: m })}><Pencil size={13} /></button>
                   <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Remove client?", body: `Remove ${m.client}?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(m) })}><Trash2 size={13} /></button>
                 </div>
@@ -1915,7 +2101,7 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, config, saveTnc }) {
   const fileRef = useRef(null);
   const [importOpen, setImportOpen] = useState(false);
   const exportJSON = () => {
@@ -1948,6 +2134,8 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
         </div>
       </div>
 
+      <TncManager config={config} saveTnc={saveTnc} />
+
       <div className="card stat" style={{ marginBottom: 14 }}>
         <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Import from Excel / Google Sheets</div>
         <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
@@ -1970,11 +2158,39 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
       <div className="card stat">
         <div className="lbl" style={{ marginBottom: 8, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>About this build</div>
         <p className="hint-line" style={{ lineHeight: 1.6, margin: 0 }}>
-          Signed in as <b style={{ color: avatarColor(currentUser) }}>{currentUser}</b>{sessionEmail ? ` (${sessionEmail})` : ""} · <b>{role === "admin" ? "Admin" : "Staff"}</b>. Records live in a shared Postgres database and sync across the team in real time{syncError ? " — but the last sync failed, so some changes may not have saved yet" : ""}. Staff accounts can't see Share &amp; accounts or Withdrawals; that's enforced by the database, not just hidden. File attachments and an installable Android version are optional add-ons documented in the project README.
+          Signed in as <b style={{ color: avatarColor(currentUser) }}>{currentUser}</b>{sessionEmail ? ` (${sessionEmail})` : ""} · <b>{ROLE_LABEL[role] || "Staff"}</b>. Records live in a shared Postgres database and sync across the team in real time{syncError ? " — but the last sync failed, so some changes may not have saved yet" : ""}. Share &amp; accounts and Withdrawals are limited to the two partners and an accountant; module access for staff is set per person on the Team screen. All of this is enforced by the database, not just hidden. File attachments and an installable Android version are optional add-ons documented in the project README.
         </p>
       </div>
 
       {importOpen && <ImportData mutate={mutate} currentUser={currentUser} onClose={() => setImportOpen(false)} />}
+    </div>
+  );
+}
+
+function TncManager({ config, saveTnc }) {
+  const version = Number(config?.tnc_version || 0);
+  const [body, setBody] = useState(config?.tnc_body || "");
+  const [saving, setSaving] = useState(false);
+  const [done, setDone] = useState(false);
+  useEffect(() => { setBody(config?.tnc_body || ""); }, [config?.tnc_body]);
+  const publish = async () => {
+    setSaving(true); setDone(false);
+    try { await saveTnc(body); setDone(true); } catch { /* surfaced via the sync banner */ } finally { setSaving(false); }
+  };
+  return (
+    <div className="card stat" style={{ marginBottom: 14 }}>
+      <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Terms &amp; conditions</div>
+      <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
+        The agreement every accountant, staff member and intern accepts on first sign-in. {version > 0 ? <>Currently on <b>version {version}</b>. </> : <>Nothing published yet. </>}
+        Publishing a change asks everyone to read and accept it again before they can carry on.
+      </p>
+      <textarea className="textarea" style={{ minHeight: 150 }} value={body} onChange={(e) => { setBody(e.target.value); setDone(false); }} placeholder="Paste or write your terms & conditions here…" />
+      <div style={{ display: "flex", gap: 12, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <button className="btn primary" onClick={publish} disabled={saving || !body.trim()}>
+          {saving ? <RefreshCw size={16} className="spin" /> : <ScrollText size={16} />}{version > 0 ? "Publish update" : "Publish terms"}
+        </button>
+        {done && <span className="hint-line" style={{ color: "var(--pos)", display: "flex", alignItems: "center", gap: 6 }}><Check size={14} /> Published — the team will be asked to re-accept.</span>}
+      </div>
     </div>
   );
 }
@@ -2262,48 +2478,96 @@ function Updates({ db, mutate, me, isAdmin }) {
   );
 }
 
+function PermsModal({ person, onSave, onClose }) {
+  const init = Array.isArray(person.perms?.modules) ? person.perms.modules : [];
+  const [mods, setMods] = useState(init);
+  const toggle = (k) => setMods((m) => m.includes(k) ? m.filter((x) => x !== k) : [...m, k]);
+  return (
+    <Modal title={`Module access — ${person.name}`} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={() => { onSave(mods); onClose(); }}><Check size={15} />Save access</button></>}>
+      <p className="hint-line" style={{ lineHeight: 1.55 }}>Tick the business modules {person.name} can open. Their personal screens — tasks, attendance, leave and daily updates — are always available.</p>
+      <div className="perm-list">
+        {GRANTABLE_MODULES.map(([k, label]) => (
+          <label key={k} className="perm-item">
+            <input type="checkbox" checked={mods.includes(k)} onChange={() => toggle(k)} />{label}
+          </label>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
 function Team({ team, me, changeProfile }) {
-  const admins = team.filter((p) => p.role === "admin").length;
-  const staff = team.length - admins;
+  const [permFor, setPermFor] = useState(null);
+  const count = (r) => team.filter((p) => p.role === r).length;
+  const setStatus = (p, status) => changeProfile(p.id, { status, active: STATUS_ACTIVE[status] });
+  const moduleSummary = (p) => {
+    if (p.role === "superadmin" || p.role === "admin") return "All modules";
+    if (p.role === "accountant") return "Share & accounts, Withdrawals";
+    if (p.role === "intern") return "Tasks, attendance, updates";
+    const mods = Array.isArray(p.perms?.modules) ? p.perms.modules : [];
+    return mods.length ? mods.map((k) => (GRANTABLE_MODULES.find((g) => g[0] === k) || [k, k])[1]).join(", ") : "Personal screens only";
+  };
   return (
     <div className="content">
       <div className="page-head"><h3>Team</h3></div>
-      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(2,1fr)", marginBottom: 16 }}>
-        <div className="card stat"><div className="lbl"><ShieldCheck size={14} /> Admins</div><div className="num">{admins}</div></div>
-        <div className="card stat"><div className="lbl"><Users size={14} /> Staff</div><div className="num">{staff}</div></div>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", marginBottom: 16 }}>
+        <div className="card stat"><div className="lbl"><ShieldCheck size={14} /> Partners</div><div className="num">{count("superadmin")}</div></div>
+        <div className="card stat"><div className="lbl"><ShieldCheck size={14} /> Admins</div><div className="num">{count("admin")}</div></div>
+        <div className="card stat"><div className="lbl"><Wallet size={14} /> Accountants</div><div className="num">{count("accountant")}</div></div>
+        <div className="card stat"><div className="lbl"><Users size={14} /> Staff</div><div className="num">{count("staff")}</div></div>
+        <div className="card stat"><div className="lbl"><Users size={14} /> Interns</div><div className="num">{count("intern")}</div></div>
       </div>
       <div className="card">
         {team.length === 0 ? <Empty icon={<Users size={22} color="var(--muted)" />} title="No one here yet" text="Share the app link so your team can create accounts." /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="tbl">
-              <thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Joined</th></tr></thead>
-              <tbody>{team.map((p) => (
-                <tr key={p.id} style={p.active === false ? { opacity: .55 } : undefined}>
-                  <td>
-                    <span className="who-cell">
-                      <span className="avatar" style={{ background: avatarColor(p.name), width: 26, height: 26, fontSize: 11 }}>{p.name[0]}</span>
-                      <span><div style={{ fontWeight: 600 }}>{p.name}{p.id === me.id ? " (you)" : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.email}</div></span>
-                    </span>
-                  </td>
-                  <td>
-                    <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={p.role} disabled={p.id === me.id}
-                      onChange={(e) => changeProfile(p.id, { role: e.target.value })}>
-                      <option value="staff">Staff</option><option value="admin">Admin</option>
-                    </select>
-                  </td>
-                  <td>
-                    {p.active === false
-                      ? <button className="btn sm" onClick={() => changeProfile(p.id, { active: true })}>Reactivate</button>
-                      : <button className="btn sm" disabled={p.id === me.id} onClick={() => changeProfile(p.id, { active: false })} style={p.id === me.id ? undefined : { color: "var(--neg)" }}>Deactivate</button>}
-                  </td>
-                  <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{p.created_at ? fmtDate(p.created_at.slice(0, 10)) : "—"}</td>
-                </tr>
-              ))}</tbody>
+              <thead><tr><th>Member</th><th>Role</th><th>Status</th><th>Module access</th><th>Joined</th></tr></thead>
+              <tbody>{team.map((p) => {
+                const isSelf = p.id === me.id;
+                const isSuper = p.role === "superadmin";
+                return (
+                  <tr key={p.id} style={p.active === false ? { opacity: .55 } : undefined}>
+                    <td>
+                      <span className="who-cell">
+                        <span className="avatar" style={{ background: avatarColor(p.name), width: 26, height: 26, fontSize: 11 }}>{p.name[0]}</span>
+                        <span><div style={{ fontWeight: 600 }}>{p.name}{isSelf ? " (you)" : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.email}</div></span>
+                      </span>
+                    </td>
+                    <td>
+                      {isSuper
+                        ? <span className="role-badge superadmin">Super admin</span>
+                        : <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={p.role} disabled={isSelf}
+                            onChange={(e) => changeProfile(p.id, { role: e.target.value })}>
+                            {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
+                          </select>}
+                    </td>
+                    <td>
+                      {isSuper
+                        ? <span className="status-pill status-active">Active</span>
+                        : <select className={"select"} style={{ width: "auto", padding: "5px 8px" }} value={p.status || "active"} disabled={isSelf}
+                            onChange={(e) => setStatus(p, e.target.value)}>
+                            {STATUS_OPTIONS.map((s) => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+                          </select>}
+                    </td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span className="hint-line" style={{ fontSize: 12 }}>{moduleSummary(p)}</span>
+                        {p.role === "staff" && <button className="btn sm" onClick={() => setPermFor(p)}><Pencil size={12} />Edit</button>}
+                      </div>
+                    </td>
+                    <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{p.created_at ? fmtDate(p.created_at.slice(0, 10)) : "—"}</td>
+                  </tr>
+                );
+              })}</tbody>
             </table>
           </div>
         )}
-        <div className="hint-line" style={{ padding: "12px 16px" }}>Staff see only Tasks, Attendance, Leave and Daily updates. Admins see everything, including Share &amp; accounts and Withdrawals.</div>
+        <div className="hint-line" style={{ padding: "12px 16px", lineHeight: 1.5 }}>
+          Partners (Haji &amp; Alim) and accountants are the only people who see Share &amp; accounts and Withdrawals. Admins run the team, projects and approvals but not the money. Set a status of Suspended, Resigned or Terminated to revoke someone's access immediately; On leave keeps it.
+        </div>
       </div>
+      {permFor && <PermsModal person={permFor} onClose={() => setPermFor(null)} onSave={(modules) => changeProfile(permFor.id, { perms: { ...(permFor.perms || {}), modules } })} />}
     </div>
   );
 }
@@ -2317,6 +2581,85 @@ function Blocked({ isDark, name, onSignOut }) {
         <h1>Access paused</h1>
         <p>Hi {name}, your account is currently inactive. Please ask an ALLBEE admin to reactivate it.</p>
         <button className="btn" style={{ marginTop: 8 }} onClick={onSignOut}><LogOut size={15} />Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+// First sign-in: collect the details every profile needs before the app opens.
+function ProfileSetup({ profile, onSave, onSignOut, isDark }) {
+  const [name, setName] = useState(profile?.name || "");
+  const [mobile, setMobile] = useState(profile?.mobile || "");
+  const [dob, setDob] = useState(profile?.dob || "");
+  const [photo, setPhoto] = useState(profile?.photo_url || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const save = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("Tell us your full name."); return; }
+    if (mobile.replace(/\D/g, "").length < 7) { setErr("Enter a valid mobile number."); return; }
+    if (!dob) { setErr("Add your date of birth."); return; }
+    setBusy(true);
+    try { await onSave({ name: name.trim(), mobile: mobile.trim(), dob, photo_url: photo.trim() || null }); }
+    catch (e) { setErr(e.message || "Couldn't save that. Try again."); setBusy(false); }
+  };
+  return (
+    <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
+      <style>{CSS}</style>
+      <div className="lock-card gate-card">
+        <img className="lock-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 52 }} />
+        <h1>Complete your profile</h1>
+        <p>A few details before you start — your team uses these to reach you.</p>
+        <div className="gate-body">
+          <Field label="Full name" required><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" /></Field>
+          <Field label="Mobile number" required hint="Used for work contact and birthday wishes."><input className="input" type="tel" value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="+91 …" /></Field>
+          <Field label="Date of birth" required><input className="input" type="date" value={dob} onChange={(e) => setDob(e.target.value)} max={todayISO()} /></Field>
+          <Field label="Profile photo URL" hint="Optional — add or change this any time."><input className="input" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+        </div>
+        {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
+        <div className="gate-foot">
+          <button className="btn primary" style={{ flex: 1, justifyContent: "center" }} onClick={save} disabled={busy}>{busy ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}Save and continue</button>
+        </div>
+        <button className="linkbtn" onClick={onSignOut}>Sign out</button>
+      </div>
+    </div>
+  );
+}
+
+// Terms gate: shown to accountants/staff/interns until they accept the current
+// published version. Editing the terms bumps the version and re-prompts everyone.
+function TermsGate({ body, version, onAccept, onSignOut, isDark }) {
+  const [checked, setChecked] = useState(false);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const ready = checked && typed.trim().toUpperCase() === "AGREE";
+  const accept = async () => {
+    if (!ready) return;
+    setBusy(true); setErr("");
+    try { await onAccept(version); }
+    catch (e) { setErr(e.message || "Couldn't record that. Try again."); setBusy(false); }
+  };
+  return (
+    <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
+      <style>{CSS}</style>
+      <div className="lock-card gate-card">
+        <img className="lock-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 52 }} />
+        <h1>Terms &amp; conditions</h1>
+        <p>Please read and accept to continue.</p>
+        <div className="tnc-scroll">{body && body.trim() ? body : "Your administrator hasn't added the agreement text yet."}</div>
+        <label className="checkrow">
+          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
+          I have read and understood the terms above.
+        </label>
+        <div style={{ marginTop: 12 }}>
+          <Field label="Type AGREE to confirm"><input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="AGREE" autoCapitalize="characters" /></Field>
+        </div>
+        {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
+        <div className="gate-foot">
+          <button className="btn primary" style={{ flex: 1, justifyContent: "center" }} onClick={accept} disabled={!ready || busy}>{busy ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}Accept &amp; continue</button>
+        </div>
+        <button className="linkbtn" onClick={onSignOut}>Sign out</button>
       </div>
     </div>
   );
@@ -2341,19 +2684,31 @@ class ErrorBoundary extends React.Component {
 }
 
 const NAV = [
-  ["dashboard", "Dashboard", LayoutDashboard, "all"],
-  ["tasks", "Tasks", ListTodo, "all"],
-  ["attendance", "Attendance", UserCheck, "all"],
-  ["leave", "Leave", Plane, "all"],
-  ["updates", "Daily updates", MessageSquare, "all"],
+  ["dashboard", "Dashboard", LayoutDashboard, "everyone"],
+  ["tasks", "Tasks", ListTodo, "work"],
+  ["attendance", "Attendance", UserCheck, "work"],
+  ["leave", "Leave", Plane, "leave"],
+  ["updates", "Daily updates", MessageSquare, "work"],
+  ["chat", "Team chat", Send, "collab"],
+  ["leads", "Leads", UserPlus, "perm:leads"],
+  ["clients", "Clients", Building2, "perm:clients"],
+  ["quotations", "Quotations", FileText, "perm:clients"],
+  ["portal-posts", "Client updates", ExternalLink, "perm:clients"],
+  ["projects", "Projects", FolderKanban, "perm:projects"],
+  ["courses", "Courses", GraduationCap, "perm:courses"],
+  ["marketing", "Marketing", Megaphone, "perm:marketing"],
+  ["concepts", "Concepts", Lightbulb, "perm:concepts"],
+  ["accounts", "Share & accounts", Wallet, "finance"],
+  ["withdrawals", "Withdrawals", ArrowDownToLine, "finance"],
+  ["planned", "Planned expenses", CalendarClock, "finance"],
+  ["vault", "Passwords", KeyRound, "vault"],
+  ["announcements", "Announcements", MegaphoneIcon, "collab"],
+  ["documents", "Documents", Paperclip, "collab"],
+  ["knowledge", "Knowledge base", BookOpen, "collab"],
+  ["performance", "Performance", TrendingUp, "insight"],
+  ["rewards", "Rewards", Award, "collab"],
   ["team", "Team", Users, "admin"],
-  ["accounts", "Share & accounts", Wallet, "admin"],
-  ["withdrawals", "Withdrawals", ArrowDownToLine, "admin"],
-  ["projects", "Projects", FolderKanban, "admin"],
-  ["courses", "Courses", GraduationCap, "admin"],
-  ["marketing", "Marketing", Megaphone, "admin"],
-  ["concepts", "Concepts", Lightbulb, "admin"],
-  ["progress", "Progress", TrendingUp, "admin"],
+  ["progress", "Progress", Activity, "admin"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
   ["settings", "Settings", SettingsIcon, "admin"],
@@ -2390,7 +2745,7 @@ function Lock({ isDark, setDark }) {
     setErr(""); setNotice("");
     if (!email.trim() || !pw) { setErr("Enter your email and password to continue."); return; }
     if (mode === "signup") {
-      if (acctType === "staff" && !name.trim()) { setErr("Enter your name so your team knows who you are."); return; }
+      if ((acctType === "staff" || acctType === "client") && !name.trim()) { setErr("Enter your name so we know who you are."); return; }
       if (acctType === "owner" && !code.trim()) { setErr("Enter the admin access code, or sign up as a team member instead."); return; }
     }
     setBusy(true);
@@ -2399,7 +2754,9 @@ function Lock({ isDark, setDark }) {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
         if (error) throw error;
       } else {
-        const meta = acctType === "owner" ? { name: who, admin_code: code.trim() } : { name: name.trim() };
+        const meta = acctType === "owner" ? { name: who, admin_code: code.trim() }
+          : acctType === "client" ? { name: name.trim(), role_intent: "client" }
+          : { name: name.trim() };
         const { data, error } = await supabase.auth.signUp({ email: email.trim(), password: pw, options: { data: meta } });
         if (error) throw error;
         if (!data.session) setNotice("Account created. Check your email to confirm it, then sign in.");
@@ -2421,13 +2778,15 @@ function Lock({ isDark, setDark }) {
           <>
             <div className="seg" style={{ width: "100%", marginBottom: 16 }}>
               <button type="button" className={acctType === "staff" ? "on" : ""} onClick={() => setAcctType("staff")}>Team member</button>
+              <button type="button" className={acctType === "client" ? "on" : ""} onClick={() => setAcctType("client")}>Client</button>
               <button type="button" className={acctType === "owner" ? "on" : ""} onClick={() => setAcctType("owner")}>Owner / admin</button>
             </div>
 
-            {acctType === "staff" ? (
+            {acctType === "staff" || acctType === "client" ? (
               <div className="field" style={{ textAlign: "left" }}>
                 <label>Your name</label>
-                <input className="input" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKey} placeholder="e.g. Priya" />
+                <input className="input" value={name} onChange={(e) => setName(e.target.value)} onKeyDown={onKey} placeholder={acctType === "client" ? "Your name or business" : "e.g. Priya"} />
+                {acctType === "client" && <p className="hint-line" style={{ fontSize: 12, marginTop: 6 }}>Client accounts see only their own project updates and quotations.</p>}
               </div>
             ) : (
               <div style={{ textAlign: "left", marginBottom: 4 }}>
@@ -2502,6 +2861,732 @@ function NamePicker({ isDark, onChoose }) {
   );
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+   PHASE 2–6 — FORMS
+══════════════════════════════════════════════════════════════════════ */
+function LeadForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { name: "", phone: "", email: "", source: "Referral", stage: "New", value: "", notes: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.name.trim()) { setErr("Add the lead's name."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), name: f.name.trim(), value: Number(f.value) || 0 });
+  };
+  return (
+    <Modal title={f.id ? "Edit lead" : "New lead"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save lead</button></>}>
+      <Field label="Name" required error={err}><input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Person or business" /></Field>
+      <div className="grid2">
+        <Field label="Phone"><input className="input" value={f.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+91 …" /></Field>
+        <Field label="Email"><input className="input" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="name@email" /></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Source"><select className="select" value={f.source} onChange={(e) => set("source", e.target.value)}>{LEAD_SOURCES.map((s) => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="Stage"><select className="select" value={f.stage} onChange={(e) => set("stage", e.target.value)}>{LEAD_STAGES.map((s) => <option key={s}>{s}</option>)}</select></Field>
+      </div>
+      <Field label="Estimated value (₹)"><input className="input" type="number" value={f.value} onChange={(e) => set("value", e.target.value)} placeholder="0" /></Field>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="What do they need?" /></Field>
+    </Modal>
+  );
+}
+
+function ClientForm({ initial, onSave, onClose, existing }) {
+  const [f, setF] = useState(initial || { name: "", phone: "", email: "", company: "", notes: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  // duplicate detection on phone / email (ignore the record being edited)
+  const dupe = (existing || []).find((c) => c.id !== f.id && ((f.phone && c.phone && c.phone.replace(/\D/g, "") === f.phone.replace(/\D/g, "")) || (f.email && c.email && c.email.toLowerCase() === f.email.toLowerCase())));
+  const save = () => {
+    if (!f.name.trim()) { setErr("Add the client's name."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), name: f.name.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit client" : "New client"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save client</button></>}>
+      <Field label="Name" required error={err}><input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Client name" /></Field>
+      {dupe && <div className="auth-msg err" style={{ marginTop: -4 }}><AlertTriangle size={14} /> Looks like a duplicate of <b style={{ margin: "0 4px" }}>{dupe.name}</b> — same {dupe.email && f.email && dupe.email.toLowerCase() === f.email.toLowerCase() ? "email" : "phone"}.</div>}
+      <div className="grid2">
+        <Field label="Phone"><input className="input" value={f.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+91 …" /></Field>
+        <Field label="Email"><input className="input" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="name@email" /></Field>
+      </div>
+      <Field label="Company"><input className="input" value={f.company} onChange={(e) => set("company", e.target.value)} placeholder="Business name (optional)" /></Field>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything worth remembering" /></Field>
+    </Modal>
+  );
+}
+
+function QuotationForm({ initial, onSave, onClose, clients, portalClients }) {
+  const [f, setF] = useState(initial || { client: "", clientId: "", title: "", status: "Draft", notes: "", items: [{ desc: "", qty: 1, rate: 0 }] });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const setItem = (i, k, v) => setF((s) => ({ ...s, items: s.items.map((it, j) => j === i ? { ...it, [k]: v } : it) }));
+  const addItem = () => setF((s) => ({ ...s, items: [...s.items, { desc: "", qty: 1, rate: 0 }] }));
+  const delItem = (i) => setF((s) => ({ ...s, items: s.items.filter((_, j) => j !== i) }));
+  const total = (f.items || []).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.rate) || 0), 0);
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.client.trim()) { setErr("Add a client name."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), client: f.client.trim(), total: round2(total) });
+  };
+  return (
+    <Modal title={f.id ? "Edit quotation" : "New quotation"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save quotation</button></>}>
+      <div className="grid2">
+        <Field label="Client" required error={err}>
+          <input className="input" list="quote-clients" value={f.client} onChange={(e) => set("client", e.target.value)} placeholder="Client name" />
+          <datalist id="quote-clients">{(clients || []).map((c) => <option key={c.id} value={c.name} />)}</datalist>
+        </Field>
+        <Field label="Status"><select className="select" value={f.status} onChange={(e) => set("status", e.target.value)}>{QUOTE_STATUS.map((s) => <option key={s}>{s}</option>)}</select></Field>
+      </div>
+      <Field label="Title"><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Website + branding" /></Field>
+      {portalClients && portalClients.length > 0 && (
+        <Field label="Share to portal client" hint="Optional — lets that client see this quote when they sign in.">
+          <select className="select" value={f.clientId} onChange={(e) => set("clientId", e.target.value)}>
+            <option value="">Don't share</option>
+            {portalClients.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.email})</option>)}
+          </select>
+        </Field>
+      )}
+      <div className="field">
+        <label>Line items</label>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {(f.items || []).map((it, i) => (
+            <div key={i} style={{ display: "grid", gridTemplateColumns: "1fr 64px 90px 32px", gap: 6, alignItems: "center" }}>
+              <input className="input" value={it.desc} onChange={(e) => setItem(i, "desc", e.target.value)} placeholder="Description" />
+              <input className="input" type="number" value={it.qty} onChange={(e) => setItem(i, "qty", e.target.value)} placeholder="Qty" />
+              <input className="input" type="number" value={it.rate} onChange={(e) => setItem(i, "rate", e.target.value)} placeholder="Rate" />
+              <button className="iconbtn" style={{ width: 32, height: 32 }} onClick={() => delItem(i)} disabled={f.items.length === 1}><X size={14} /></button>
+            </div>
+          ))}
+        </div>
+        <button className="btn sm" style={{ marginTop: 8 }} onClick={addItem}><Plus size={13} />Add line</button>
+      </div>
+      <div className="calc-box"><div className="calc-row"><span>Total</span><b className="mono">{money(total)}</b></div></div>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Terms, validity, etc." /></Field>
+    </Modal>
+  );
+}
+
+function PlannedForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", category: "Office Rent", amount: "", recurrence: "Monthly", nextDue: todayISO(), notes: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Name this expense."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), amount: Number(f.amount) || 0 });
+  };
+  return (
+    <Modal title={f.id ? "Edit planned expense" : "New planned expense"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <Field label="What is it?" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Office rent" /></Field>
+      <div className="grid2">
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Amount (₹)"><input className="input" type="number" value={f.amount} onChange={(e) => set("amount", e.target.value)} placeholder="0" /></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Repeats"><select className="select" value={f.recurrence} onChange={(e) => set("recurrence", e.target.value)}>{EXPENSE_RECURRENCE.map((r) => <option key={r}>{r}</option>)}</select></Field>
+        <Field label="Next due"><input className="input" type="date" value={f.nextDue} onChange={(e) => set("nextDue", e.target.value)} /></Field>
+      </div>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Optional" /></Field>
+    </Modal>
+  );
+}
+
+function VaultForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { service: "", category: "Social", username: "", password: "", url: "", notes: "" });
+  const [show, setShow] = useState(false);
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.service.trim()) { setErr("Name the service."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), service: f.service.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit credential" : "New credential"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Service" required error={err}><input className="input" value={f.service} onChange={(e) => set("service", e.target.value)} placeholder="e.g. Instagram" /></Field>
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{VAULT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      </div>
+      <Field label="Username / email"><input className="input" value={f.username} onChange={(e) => set("username", e.target.value)} placeholder="login@…" /></Field>
+      <Field label="Password">
+        <div style={{ display: "flex", gap: 6 }}>
+          <input className="input" type={show ? "text" : "password"} value={f.password} onChange={(e) => set("password", e.target.value)} placeholder="••••••••" />
+          <button className="iconbtn" onClick={() => setShow((v) => !v)} type="button" aria-label="Show/hide">{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>
+        </div>
+      </Field>
+      <Field label="Login URL"><input className="input" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Notes" hint="Recovery email, 2FA backup codes, etc."><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
+    </Modal>
+  );
+}
+
+function DocForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", category: "Contract", url: "", notes: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Add a title."); return; }
+    if (!f.url.trim()) { setErr("Add a link to the file."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), url: f.url.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit document" : "Add document"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. NDA template" /></Field>
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{DOC_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      </div>
+      <Field label="Link" required hint="Paste a Drive / Dropbox / web link."><input className="input" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://…" /></Field>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
+    </Modal>
+  );
+}
+
+function KbForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", category: "How-to", body: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Add a title."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit article" : "New article"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. How to onboard a client" /></Field>
+        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{KB_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+      </div>
+      <Field label="Content"><textarea className="textarea" style={{ minHeight: 180 }} value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="Write the guide…" /></Field>
+    </Modal>
+  );
+}
+
+function RewardForm({ initial, onSave, onClose, team }) {
+  const staff = (team || []).filter((p) => ["staff", "intern", "admin", "accountant"].includes(p.role));
+  const [f, setF] = useState(initial || { userId: staff[0]?.id || "", kind: "Star performer", points: 10, note: "", date: todayISO() });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.userId) { setErr("Pick a team member."); return; }
+    const person = staff.find((p) => p.id === f.userId);
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), userName: person?.name || "", points: Number(f.points) || 0 });
+  };
+  return (
+    <Modal title={f.id ? "Edit recognition" : "Give recognition"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Award size={15} />Award</button></>}>
+      <Field label="To" required error={err}>
+        <select className="select" value={f.userId} onChange={(e) => set("userId", e.target.value)}>
+          {staff.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="grid2">
+        <Field label="For"><select className="select" value={f.kind} onChange={(e) => set("kind", e.target.value)}>{REWARD_KINDS.map((k) => <option key={k}>{k}</option>)}</select></Field>
+        <Field label="Points"><input className="input" type="number" value={f.points} onChange={(e) => set("points", e.target.value)} /></Field>
+      </div>
+      <Field label="Note"><textarea className="textarea" value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="What did they do well?" /></Field>
+    </Modal>
+  );
+}
+
+function PortalPostForm({ initial, onSave, onClose, portalClients }) {
+  const [f, setF] = useState(initial || { clientId: portalClients?.[0]?.id || "", title: "", body: "", status: "In progress" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.clientId) { setErr("Pick a client."); return; }
+    if (!f.title.trim()) { setErr("Add a heading."); return; }
+    const person = (portalClients || []).find((p) => p.id === f.clientId);
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), clientName: person?.name || "", title: f.title.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit update" : "Post a client update"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Send size={15} />Post</button></>}>
+      {(!portalClients || portalClients.length === 0)
+        ? <p className="hint-line">No client portal accounts yet. A client creates one from the login screen (choose <b>Client</b>), then they'll appear here.</p>
+        : <>
+          <Field label="Client" required error={err}>
+            <select className="select" value={f.clientId} onChange={(e) => set("clientId", e.target.value)}>{portalClients.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.email})</option>)}</select>
+          </Field>
+          <div className="grid2">
+            <Field label="Heading"><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Homepage design ready" /></Field>
+            <Field label="Status"><select className="select" value={f.status} onChange={(e) => set("status", e.target.value)}>{["Not started", "In progress", "Review", "Completed", "On hold"].map((s) => <option key={s}>{s}</option>)}</select></Field>
+          </div>
+          <Field label="Message"><textarea className="textarea" value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="What's the latest for this client?" /></Field>
+        </>}
+    </Modal>
+  );
+}
+
+function AnnouncementForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", body: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Add a headline."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit announcement" : "New announcement"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><MegaphoneIcon size={15} />Post</button></>}>
+      <Field label="Headline" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Office closed on Friday" /></Field>
+      <Field label="Details"><textarea className="textarea" style={{ minHeight: 120 }} value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="The full message…" /></Field>
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   PHASE 2–6 — SCREENS
+══════════════════════════════════════════════════════════════════════ */
+function LoadMore({ shown, total, onMore }) {
+  if (shown >= total) return null;
+  return <div style={{ textAlign: "center", padding: "14px 0" }}><button className="btn" onClick={onMore}>Show more ({total - shown} more)</button></div>;
+}
+
+function Leads({ db, mutate, openModal, removeItem, isAdmin }) {
+  const [stage, setStage] = useState("All");
+  const [n, setN] = useState(25);
+  const all = [...db.leads].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = stage === "All" ? all : all.filter((l) => l.stage === stage);
+  const setLeadStage = (l, s) => mutate((d) => ({ ...d, leads: d.leads.map((x) => x.id === l.id ? { ...x, stage: s } : x) }), { action: `moved lead "${l.name}" to ${s}`, module: "Leads" });
+  const convert = (l) => openModal({ type: "client", initial: { name: l.name, phone: l.phone, email: l.email, notes: l.notes }, fromLead: l.id });
+  const del = (l) => removeItem("leads", l, { name: l.name, audit: `deleted lead "${l.name}"` });
+  const tone = (s) => s === "Won" ? "pos" : s === "Lost" ? "neg" : s === "Proposal" ? "accent" : "pri";
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Leads</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "lead" })}><Plus size={16} />New lead</button></div>
+      <div className="toolbar"><div className="seg">{["All", ...LEAD_STAGES].map((s) => <button key={s} className={stage === s ? "on" : ""} onClick={() => { setStage(s); setN(25); }}>{s}</button>)}</div></div>
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<UserPlus size={22} color="var(--muted)" />} title="No leads here" text="Capture every enquiry and move it from New all the way to Won." action={<button className="btn primary" onClick={() => openModal({ type: "lead" })}><Plus size={16} />New lead</button>} />
+          : list.slice(0, n).map((l) => (
+            <div key={l.id} className="item-row">
+              <div className="item-main">
+                <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                  <span className="item-title">{l.name}</span>
+                  <span className={"badge " + tone(l.stage)}>{l.stage}</span>
+                  {l.value > 0 && <span className="badge">{money(l.value)}</span>}
+                </div>
+                <div className="item-meta">{l.source && <span><Tag size={12} style={{ verticalAlign: -2 }} /> {l.source}</span>}{l.phone && <span><Phone size={12} style={{ verticalAlign: -2 }} /> {l.phone}</span>}{l.email && <span>{l.email}</span>}</div>
+              </div>
+              <div className="row-actions" style={{ alignItems: "center" }}>
+                <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={l.stage} onChange={(e) => setLeadStage(l, e.target.value)}>{LEAD_STAGES.map((s) => <option key={s}>{s}</option>)}</select>
+                {l.stage === "Won" && <button className="btn sm primary" onClick={() => convert(l)}><ArrowRight size={13} />Client</button>}
+                <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "lead", initial: l })}><Pencil size={14} /></button>
+                <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete lead?", body: `Delete "${l.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(l) })}><Trash2 size={14} /></button>
+              </div>
+            </div>
+          ))}
+        <LoadMore shown={Math.min(n, list.length)} total={list.length} onMore={() => setN((x) => x + 25)} />
+      </div>
+    </div>
+  );
+}
+
+function Clients({ db, mutate, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [n, setN] = useState(25);
+  const all = [...db.clients].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = q.trim() ? all.filter((c) => (c.name + " " + (c.company || "") + " " + (c.phone || "") + " " + (c.email || "")).toLowerCase().includes(q.toLowerCase())) : all;
+  const del = (c) => removeItem("clients", c, { name: c.name, audit: `removed client "${c.name}"` });
+  const quote = (c) => openModal({ type: "quotation", initial: { client: c.name } });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Clients</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "client" })}><Plus size={16} />New client</button></div>
+      <div className="toolbar"><div className="search"><Search size={16} color="var(--muted)" /><input value={q} onChange={(e) => { setQ(e.target.value); setN(25); }} placeholder="Search clients…" /></div></div>
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<Building2 size={22} color="var(--muted)" />} title={q ? "No matches" : "No clients yet"} text="Win a lead or add a client directly, then send them quotations." action={!q && <button className="btn primary" onClick={() => openModal({ type: "client" })}><Plus size={16} />New client</button>} />
+          : <div style={{ overflowX: "auto" }}><table className="tbl">
+            <thead><tr><th>Client</th><th>Contact</th><th>Added</th><th></th></tr></thead>
+            <tbody>{list.slice(0, n).map((c) => (
+              <tr key={c.id}>
+                <td><div style={{ fontWeight: 600 }}>{c.name}</div>{c.company && <div className="hint-line" style={{ fontSize: 11 }}>{c.company}</div>}</td>
+                <td>{c.phone && <div style={{ fontSize: 13 }}>{c.phone}</div>}{c.email && <div className="hint-line" style={{ fontSize: 11 }}>{c.email}</div>}{!c.phone && !c.email && "—"}</td>
+                <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{c.createdAt ? fmtDate(new Date(c.createdAt).toISOString().slice(0, 10)) : "—"}</td>
+                <td><div className="row-actions">
+                  <button className="btn sm" onClick={() => quote(c)}><FileText size={13} />Quote</button>
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "client", initial: c })}><Pencil size={14} /></button>
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Remove client?", body: `Remove ${c.name}?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(c) })}><Trash2 size={14} /></button>
+                </div></td>
+              </tr>
+            ))}</tbody>
+          </table></div>}
+        <LoadMore shown={Math.min(n, list.length)} total={list.length} onMore={() => setN((x) => x + 25)} />
+      </div>
+    </div>
+  );
+}
+
+function Quotations({ db, mutate, openModal, removeItem }) {
+  const [status, setStatus] = useState("All");
+  const all = [...db.quotations].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = status === "All" ? all : all.filter((qt) => qt.status === status);
+  const setQuoteStatus = (qt, s) => mutate((d) => ({ ...d, quotations: d.quotations.map((x) => x.id === qt.id ? { ...x, status: s } : x) }), { action: `marked quote for ${qt.client} ${s}`, module: "Quotations" });
+  const del = (qt) => removeItem("quotations", qt, { name: qt.client, audit: `deleted quotation for ${qt.client}` });
+  const tone = (s) => s === "Accepted" ? "pos" : s === "Rejected" ? "neg" : s === "Sent" ? "pri" : "";
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Quotations</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "quotation" })}><Plus size={16} />New quotation</button></div>
+      <div className="toolbar"><div className="seg">{["All", ...QUOTE_STATUS].map((s) => <button key={s} className={status === s ? "on" : ""} onClick={() => setStatus(s)}>{s}</button>)}</div></div>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
+        {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<FileText size={22} color="var(--muted)" />} title="No quotations" text="Build a quote with line items and a running total, then mark it Sent." action={<button className="btn primary" onClick={() => openModal({ type: "quotation" })}><Plus size={16} />New quotation</button>} /></div>
+          : list.map((qt) => (
+            <div key={qt.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{qt.client}</div><div className="sub">{qt.title || "Quotation"}</div></div>
+                <div className="mono" style={{ fontWeight: 700 }}>{money(qt.total)}</div>
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <span className={"badge " + tone(qt.status)}>{qt.status}</span>
+                {(qt.items || []).length > 0 && <span className="hint-line" style={{ fontSize: 12 }}>{qt.items.length} item{qt.items.length > 1 ? "s" : ""}</span>}
+                {qt.clientId && <span className="badge accent">Shared</span>}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 2, alignItems: "center" }}>
+                <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={qt.status} onChange={(e) => setQuoteStatus(qt, e.target.value)}>{QUOTE_STATUS.map((s) => <option key={s}>{s}</option>)}</select>
+                <button className="btn sm" onClick={() => openModal({ type: "quotation", initial: qt })}><Pencil size={13} /></button>
+                <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete quotation?", body: `Delete the quote for ${qt.client}?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(qt) })}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function Planned({ db, mutate, openModal, removeItem, openIncome, canFinance }) {
+  const list = [...db.planned].sort((a, b) => (a.nextDue || "").localeCompare(b.nextDue || ""));
+  const del = (p) => removeItem("planned", p, { name: p.title, audit: `deleted planned expense "${p.title}"` });
+  const monthlyTotal = list.filter((p) => p.recurrence === "Monthly").reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const dueTone = (p) => { if (!p.nextDue) return "muted"; const today = todayISO(); return p.nextDue < today ? "neg" : p.nextDue <= new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) ? "accent" : "muted"; };
+  const recordPaid = (p) => {
+    openIncome({ kind: "expense", category: p.category, amount: p.amount, notes: p.title, source: { kind: "planned", id: p.id } });
+  };
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Planned & recurring expenses</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "planned" })}><Plus size={16} />New</button></div>
+      <div className="sumrow">
+        <div className="card"><div className="k"><CalendarClock size={14} /> Recurring monthly</div><div className="v mono">{money(monthlyTotal)}</div></div>
+        <div className="card"><div className="k"><Banknote size={14} /> Items tracked</div><div className="v mono">{list.length}</div></div>
+      </div>
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<CalendarClock size={22} color="var(--muted)" />} title="Nothing planned yet" text="Track rent, subscriptions and other regular costs, and log them as expenses when paid." action={<button className="btn primary" onClick={() => openModal({ type: "planned" })}><Plus size={16} />New planned expense</button>} />
+          : <div style={{ overflowX: "auto" }}><table className="tbl">
+            <thead><tr><th>Expense</th><th>Repeats</th><th>Next due</th><th className="num-cell">Amount</th><th></th></tr></thead>
+            <tbody>{list.map((p) => (
+              <tr key={p.id}>
+                <td><div style={{ fontWeight: 600 }}>{p.title}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.category}</div></td>
+                <td>{p.recurrence}</td>
+                <td><span className={"badge " + dueTone(p)}>{p.nextDue ? fmtDate(p.nextDue) : "—"}</span></td>
+                <td className="num-cell mono">{money(p.amount)}</td>
+                <td><div className="row-actions">
+                  {canFinance && <button className="btn sm primary" onClick={() => recordPaid(p)}>Log expense</button>}
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "planned", initial: p })}><Pencil size={14} /></button>
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete?", body: `Delete "${p.title}"?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={14} /></button>
+                </div></td>
+              </tr>
+            ))}</tbody>
+          </table></div>}
+      </div>
+    </div>
+  );
+}
+
+function Vault({ db, mutate, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [reveal, setReveal] = useState({});
+  const all = [...db.vault].sort((a, b) => (a.service || "").localeCompare(b.service || ""));
+  const list = q.trim() ? all.filter((v) => (v.service + " " + (v.category || "") + " " + (v.username || "")).toLowerCase().includes(q.toLowerCase())) : all;
+  const del = (v) => removeItem("vault", v, { name: v.service, audit: `deleted credential "${v.service}"` });
+  const copy = (t) => { try { navigator.clipboard?.writeText(t || ""); } catch { /* clipboard may be blocked */ } };
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Passwords</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button></div>
+      <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><LockIcon size={15} /> Visible to partners only. Stored in your database with row-level security.</div>
+      <div className="toolbar" style={{ marginTop: 14 }}><div className="search"><Search size={16} color="var(--muted)" /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search logins…" /></div></div>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
+        {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<KeyRound size={22} color="var(--muted)" />} title={q ? "No matches" : "No logins saved"} text="Keep shared business logins — social, hosting, email, domains — in one safe place." action={!q && <button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button>} /></div>
+          : list.map((v) => (
+            <div key={v.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{v.service}</div><div className="sub">{v.category}</div></div>
+                <span className="tag">{v.category}</span>
+              </div>
+              {v.username && <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}><span className="hint-line" style={{ minWidth: 64 }}>User</span><span className="mono" style={{ flex: 1, wordBreak: "break-all" }}>{v.username}</span><button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.username)}><Copy size={13} /></button></div>}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}><span className="hint-line" style={{ minWidth: 64 }}>Pass</span><span className="mono" style={{ flex: 1 }}>{reveal[v.id] ? v.password : "••••••••"}</span>
+                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => setReveal((r) => ({ ...r, [v.id]: !r[v.id] }))}>{reveal[v.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.password)}><Copy size={13} /></button>
+              </div>
+              {v.url && <a className="hint-line" href={v.url} target="_blank" rel="noreferrer" style={{ color: "var(--primary)", fontSize: 12.5, display: "inline-flex", alignItems: "center", gap: 5 }}><ExternalLink size={12} />Open login</a>}
+              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                <button className="btn sm" onClick={() => openModal({ type: "vault", initial: v })}><Pencil size={13} />Edit</button>
+                <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete credential?", body: `Delete "${v.service}"?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(v) })}><Trash2 size={13} /></button>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function Announcements({ db, mutate, openModal, removeItem, isAdmin }) {
+  const list = [...db.announcements].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const del = (a) => removeItem("announcements", a, { name: a.title, audit: `deleted announcement "${a.title}"` });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Announcements</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "announcement" })}><Plus size={16} />New announcement</button>}</div>
+      {list.length === 0 ? <div className="card"><Empty icon={<MegaphoneIcon size={22} color="var(--muted)" />} title="Nothing announced yet" text={isAdmin ? "Post company-wide news here — everyone sees it and gets a bell." : "Company news from your admins will show up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "announcement" })}><Plus size={16} />New announcement</button>} /></div>
+        : <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>{list.map((a) => (
+          <div key={a.id} className="card stat">
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 16 }}>{a.title}</div>
+                {a.body && <div style={{ marginTop: 6, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{a.body}</div>}
+                <div className="item-meta" style={{ marginTop: 8 }}><span>{a.by || "Admin"}</span><span>{fmtDateTime(a.createdAt)}</span></div>
+              </div>
+              {isAdmin && <div className="row-actions"><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "announcement", initial: a })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete announcement?", body: `Delete "${a.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(a) })}><Trash2 size={14} /></button></div>}
+            </div>
+          </div>
+        ))}</div>}
+    </div>
+  );
+}
+
+function Documents({ db, mutate, openModal, removeItem, isAdmin }) {
+  const [cat, setCat] = useState("All");
+  const all = [...db.documents].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = cat === "All" ? all : all.filter((d) => d.category === cat);
+  const del = (d) => removeItem("documents", d, { name: d.title, audit: `deleted document "${d.title}"` });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Documents</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button>}</div>
+      <div className="toolbar"><div className="seg">{["All", ...DOC_CATEGORIES].map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div></div>
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<FileText size={22} color="var(--muted)" />} title="No documents" text={isAdmin ? "Keep shared contracts, templates and brand files (as links) in one place." : "Shared files from your team will show up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "document" })}><Plus size={16} />Add document</button>} />
+          : list.map((d) => (
+            <div key={d.id} className="item-row">
+              <div className="empty" style={{ padding: 0 }}><div className="ic" style={{ width: 40, height: 40, margin: 0 }}><FileText size={18} color="var(--muted)" /></div></div>
+              <div className="item-main">
+                <div className="item-title"><a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", textDecoration: "none" }}>{d.title}</a></div>
+                <div className="item-meta"><span className="tag">{d.category}</span>{d.notes && <span>{d.notes}</span>}<span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div>
+              </div>
+              <div className="row-actions" style={{ alignItems: "center" }}>
+                <a className="btn sm" href={d.url} target="_blank" rel="noreferrer"><ExternalLink size={13} />Open</a>
+                {isAdmin && <><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "document", initial: d })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete document?", body: `Delete "${d.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(d) })}><Trash2 size={14} /></button></>}
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
+  const [open, setOpen] = useState(null);
+  const [cat, setCat] = useState("All");
+  const all = [...db.knowledge].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = cat === "All" ? all : all.filter((k) => k.category === cat);
+  const del = (k) => removeItem("knowledge", k, { name: k.title, audit: `deleted article "${k.title}"` });
+  const article = open ? db.knowledge.find((k) => k.id === open) : null;
+  if (article) return (
+    <div className="content">
+      <button className="backlink" onClick={() => setOpen(null)}><ArrowLeft size={15} />Back to knowledge base</button>
+      <div className="detail-head"><div><h3>{article.title}</h3><div className="item-meta" style={{ marginTop: 6 }}><span className="tag">{article.category}</span><span>{fmtDate(new Date(article.createdAt).toISOString().slice(0, 10))}</span></div></div></div>
+      <div className="card stat" style={{ lineHeight: 1.65, whiteSpace: "pre-wrap", fontSize: 14.5 }}>{article.body || "No content yet."}</div>
+    </div>
+  );
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Knowledge base</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "knowledge" })}><Plus size={16} />New article</button>}</div>
+      <div className="toolbar"><div className="seg">{["All", ...KB_CATEGORIES].map((c) => <button key={c} className={cat === c ? "on" : ""} onClick={() => setCat(c)}>{c}</button>)}</div></div>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))" }}>
+        {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<BookOpen size={22} color="var(--muted)" />} title="No articles yet" text={isAdmin ? "Write down how-tos, policies and onboarding guides for the team." : "Guides from your team will show up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "knowledge" })}><Plus size={16} />New article</button>} /></div>
+          : list.map((k) => (
+            <div key={k.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 8, cursor: "pointer" }} onClick={() => setOpen(k.id)}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}><BookOpen size={16} color="var(--primary)" /><span className="tag">{k.category}</span></div>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{k.title}</div>
+              <div className="sub" style={{ lineHeight: 1.5 }}>{(k.body || "").slice(0, 110)}{(k.body || "").length > 110 ? "…" : ""}</div>
+              {isAdmin && <div style={{ display: "flex", gap: 6, marginTop: 2 }} onClick={(e) => e.stopPropagation()}><button className="btn sm" onClick={() => openModal({ type: "knowledge", initial: k })}><Pencil size={13} /></button><button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete article?", body: `Delete "${k.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(k) })}><Trash2 size={13} /></button></div>}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function Chat({ db, mutate, me }) {
+  const [text, setText] = useState("");
+  const endRef = useRef(null);
+  const list = [...db.chat].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
+  const send = () => {
+    const t = text.trim(); if (!t) return;
+    setText("");
+    mutate((d) => ({ ...d, chat: [...d.chat, { id: uid(), userId: me.id, userName: me.name, text: t, createdAt: Date.now() }] }), null);
+  };
+  return (
+    <div className="content" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 160px)" }}>
+      <div className="page-head"><h3>Team chat</h3></div>
+      <div className="card" style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        {list.length === 0 ? <Empty icon={<Send size={22} color="var(--muted)" />} title="Say hello 👋" text="This channel is shared with the whole internal team." />
+          : list.map((m) => {
+            const mine = m.userId === me.id;
+            return (
+              <div key={m.id} style={{ display: "flex", gap: 10, flexDirection: mine ? "row-reverse" : "row" }}>
+                <div className="avatar" style={{ background: avatarColor(m.userName), width: 30, height: 30, fontSize: 12, flex: "none" }}>{(m.userName || "?")[0]}</div>
+                <div style={{ maxWidth: "72%" }}>
+                  <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}</div>
+                </div>
+              </div>
+            );
+          })}
+        <div ref={endRef} />
+      </div>
+      <div className="composer" style={{ marginTop: 12 }}>
+        <textarea className="textarea" style={{ minHeight: 44 }} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Message the team… (Enter to send)" />
+        <button className="btn primary" onClick={send} disabled={!text.trim()}><Send size={16} />Send</button>
+      </div>
+    </div>
+  );
+}
+
+function Performance({ db, team }) {
+  const month = new Date();
+  const staff = (team || []).filter((p) => ["staff", "intern", "admin", "accountant"].includes(p.role) && p.active !== false);
+  const rows = staff.map((p) => {
+    const done = db.tasks.filter((t) => t.assignedTo === p.name && t.status === "Completed").length;
+    const open = db.tasks.filter((t) => t.assignedTo === p.name && t.status !== "Completed").length;
+    const present = db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month)).length;
+    const points = db.rewards.filter((r) => r.userId === p.id).reduce((s, r) => s + (Number(r.points) || 0), 0);
+    const score = done * 10 + present * 2 + points;
+    return { p, done, open, present, points, score };
+  }).sort((a, b) => b.score - a.score);
+  const medal = (i) => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}`;
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Performance</h3></div>
+      <div className="card">
+        {rows.length === 0 ? <Empty icon={<TrendingUp size={22} color="var(--muted)" />} title="No team data yet" text="As people complete tasks, check in and earn recognition, the leaderboard fills up." />
+          : <div style={{ overflowX: "auto" }}><table className="tbl">
+            <thead><tr><th>#</th><th>Member</th><th className="num-cell">Tasks done</th><th className="num-cell">Open</th><th className="num-cell">Days in ({month.toLocaleDateString("en-IN", { month: "short" })})</th><th className="num-cell">Points</th><th className="num-cell">Score</th></tr></thead>
+            <tbody>{rows.map((r, i) => (
+              <tr key={r.p.id}>
+                <td style={{ fontSize: 16 }}>{medal(i)}</td>
+                <td><span className="who-cell"><span className="avatar" style={{ background: avatarColor(r.p.name), width: 26, height: 26, fontSize: 11 }}>{r.p.name[0]}</span><span><div style={{ fontWeight: 600 }}>{r.p.name}</div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[r.p.role]}</div></span></span></td>
+                <td className="num-cell mono">{r.done}</td><td className="num-cell mono">{r.open}</td><td className="num-cell mono">{r.present}</td><td className="num-cell mono">{r.points}</td>
+                <td className="num-cell mono" style={{ fontWeight: 700 }}>{r.score}</td>
+              </tr>
+            ))}</tbody>
+          </table></div>}
+        <div className="hint-line" style={{ padding: "12px 16px" }}>Score = tasks completed ×10 + days present this month ×2 + recognition points.</div>
+      </div>
+    </div>
+  );
+}
+
+function Rewards({ db, mutate, openModal, removeItem, me, isAdmin, team }) {
+  const all = [...db.rewards].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = isAdmin ? all : all.filter((r) => r.userId === me.id);
+  const del = (r) => removeItem("rewards", r, { name: r.userName, audit: `removed recognition for ${r.userName}` });
+  const myPoints = db.rewards.filter((r) => r.userId === me.id).reduce((s, r) => s + (Number(r.points) || 0), 0);
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Recognition & rewards</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "reward" })}><Award size={16} />Give recognition</button>}</div>
+      {!isAdmin && <div className="sumrow"><div className="card"><div className="k"><Star size={14} /> Your points</div><div className="v mono">{myPoints}</div></div></div>}
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<Award size={22} color="var(--muted)" />} title={isAdmin ? "No recognition given yet" : "No recognition yet"} text={isAdmin ? "Celebrate good work — points feed the performance leaderboard." : "When an admin recognises your work, it shows up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "reward" })}><Award size={16} />Give recognition</button>} />
+          : list.map((r) => (
+            <div key={r.id} className="item-row">
+              <div className="avatar" style={{ background: avatarColor(r.userName), width: 34, height: 34, fontSize: 14 }}>{(r.userName || "?")[0]}</div>
+              <div className="item-main">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span className="item-title">{r.userName}</span><span className="badge accent">{r.kind}</span><span className="badge pos">+{r.points} pts</span></div>
+                {r.note && <div className="item-meta" style={{ marginTop: 4 }}>{r.note}</div>}
+                <div className="item-meta"><span>{fmtDate(r.date || new Date(r.createdAt).toISOString().slice(0, 10))}</span></div>
+              </div>
+              {isAdmin && <div className="row-actions"><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Remove recognition?", body: `Remove this for ${r.userName}?`, note: "Moves to Recently deleted.", onConfirm: () => del(r) })}><Trash2 size={14} /></button></div>}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function PortalPosts({ db, mutate, openModal, removeItem, portalClients }) {
+  const list = [...db.portal_posts].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const del = (p) => removeItem("portal_posts", p, { name: p.title, audit: `deleted client update "${p.title}"` });
+  const statusTone = (s) => s === "Completed" ? "pos" : s === "On hold" ? "neg" : s === "Review" ? "accent" : "pri";
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Client updates</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "portalPost" })}><Plus size={16} />Post update</button></div>
+      <p className="hint-line" style={{ marginTop: -4 }}>Updates you post here appear in that client's portal when they sign in.</p>
+      <div className="card" style={{ marginTop: 12 }}>
+        {list.length === 0 ? <Empty icon={<ExternalLink size={22} color="var(--muted)" />} title="No client updates yet" text={portalClients.length === 0 ? "No client portal accounts yet — a client signs up from the login screen (choose Client)." : "Post a status update and your client will see it in their portal."} action={portalClients.length > 0 && <button className="btn primary" onClick={() => openModal({ type: "portalPost" })}><Plus size={16} />Post update</button>} />
+          : list.map((p) => (
+            <div key={p.id} className="item-row">
+              <div className="item-main">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span className="item-title">{p.title}</span><span className={"badge " + statusTone(p.status)}>{p.status}</span></div>
+                <div className="item-meta"><span><Building2 size={12} style={{ verticalAlign: -2 }} /> {p.clientName}</span><span>{fmtDateTime(p.createdAt)}</span></div>
+                {p.body && <div className="sub" style={{ marginTop: 4 }}>{p.body}</div>}
+              </div>
+              <div className="row-actions">
+                <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "portalPost", initial: p })}><Pencil size={14} /></button>
+                <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete update?", body: `Delete "${p.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(p) })}><Trash2 size={14} /></button>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Client portal: a separate, read-only surface for external clients ──── */
+function ClientPortal({ db, profile, signOut, isDark }) {
+  const myId = profile?.id;
+  const posts = [...db.portal_posts].filter((p) => p.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const quotes = [...db.quotations].filter((q) => q.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const statusTone = (s) => s === "Completed" ? "pos" : s === "On hold" ? "neg" : s === "Review" ? "accent" : "pri";
+  return (
+    <div className="allbee" data-theme={isDark ? "dark" : "light"} style={{ minHeight: "100vh" }}>
+      <style>{CSS}</style>
+      <header className="topbar" style={{ position: "sticky", top: 0 }}>
+        <img className="brand-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 30 }} />
+        <div><h2 style={{ fontSize: 16 }}>Client portal</h2><div className="topbar-sub">ALLBEE Solutions</div></div>
+        <span className="spacer" style={{ flex: 1 }} />
+        <div className="userchip" onClick={signOut} style={{ cursor: "pointer" }}><div className="avatar" style={{ background: avatarColor(profile?.name || "C") }}>{(profile?.name || "C")[0]}</div><span className="userchip-name">{profile?.name}</span><LogOut size={15} /></div>
+      </header>
+      <div className="content" style={{ maxWidth: 820, margin: "0 auto" }}>
+        <div className="page-head"><h3>Welcome, {profile?.name?.split(" ")[0] || "there"}</h3></div>
+
+        <div className="card stat" style={{ marginBottom: 16 }}>
+          <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Your project updates</div>
+          {posts.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No updates yet. We'll post progress here as we go.</p>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>{posts.map((p) => (
+              <div key={p.id} style={{ borderLeft: "3px solid var(--primary)", paddingLeft: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700 }}>{p.title}</span><span className={"badge " + statusTone(p.status)}>{p.status}</span></div>
+                {p.body && <div style={{ marginTop: 5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{p.body}</div>}
+                <div className="hint-line" style={{ fontSize: 11.5, marginTop: 5 }}>{fmtDateTime(p.createdAt)}</div>
+              </div>
+            ))}</div>}
+        </div>
+
+        <div className="card stat">
+          <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Your quotations</div>
+          {quotes.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No quotations shared with you yet.</p>
+            : <div style={{ overflowX: "auto", marginTop: 10 }}><table className="tbl">
+              <thead><tr><th>Quotation</th><th>Status</th><th className="num-cell">Total</th></tr></thead>
+              <tbody>{quotes.map((q) => (
+                <tr key={q.id}><td><div style={{ fontWeight: 600 }}>{q.title || "Quotation"}</div><div className="hint-line" style={{ fontSize: 11 }}>{(q.items || []).length} item{(q.items || []).length === 1 ? "" : "s"}</div></td>
+                  <td><span className={"badge " + (q.status === "Accepted" ? "pos" : q.status === "Rejected" ? "neg" : "pri")}>{q.status}</span></td>
+                  <td className="num-cell mono">{money(q.total)}</td></tr>
+              ))}</tbody>
+            </table></div>}
+          <p className="hint-line" style={{ marginTop: 12 }}>Questions about a quote? Reply to the email from your ALLBEE contact.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function App() {
   const [db, setDb] = useState(null);
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
@@ -2509,11 +3594,7 @@ export default function App() {
   const [team, setTeam] = useState([]);
   const [loading, setLoading] = useState(true);
   const [syncError, setSyncError] = useState(null);
-  const [isDark, setIsDark] = useState(() => {
-    // Phase 3: default theme is Light. A previously saved choice always wins.
-    try { const t = localStorage.getItem("allbee-theme"); if (t) return t === "dark"; } catch {}
-    return false;
-  });
+  const [isDark, setIsDark] = useState(true);
   const [route, setRoute] = useState("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
   const [userMenu, setUserMenu] = useState(false);
@@ -2521,15 +3602,15 @@ export default function App() {
   const [balanceUser, setBalanceUser] = useState(null);
   const [accountUser, setAccountUser] = useState(null);   // full-page partner statement (Haji/Alim)
   const [taskDetailId, setTaskDetailId] = useState(null); // full-page task detail
+  const [config, setConfig] = useState(null);             // app_config (T&C body + version)
+  const [locks, setLocks] = useState([]);                 // locked financial periods ('YYYY-MM')
 
   const currentUser = profile?.name || null;
-  const isAdmin = profile?.role === "admin";
-  const me = { id: session?.user?.id, name: currentUser, role: profile?.role };
-
-  // Remember the user's light/dark choice across sessions (req: System remembers preference).
-  useEffect(() => {
-    try { localStorage.setItem("allbee-theme", isDark ? "dark" : "light"); } catch {}
-  }, [isDark]);
+  const role = profile?.role;
+  const isSuper = isSuperRole(role);
+  const isAdmin = isAdminRole(role);        // management level (superadmin OR admin)
+  const canFinance = canFinanceRole(role);  // the money (superadmin OR accountant)
+  const me = { id: session?.user?.id, name: currentUser, role };
 
   // ── auth session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -2538,21 +3619,25 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // ── load my profile + the team, with live updates ─────────────────────
+  // ── load my profile + the team + config, with live updates ────────────
   const loadPeople = useCallback(async (user) => {
     try {
       await ensureProfile(user);
-      const list = await fetchTeam();
+      const [list, cfg, lk] = await Promise.all([fetchTeam(), fetchConfig(), fetchLocks()]);
       setTeam(list);
+      setConfig(cfg);
+      setLocks(lk);
       setProfile(list.find((p) => p.id === user.id) || null);
     } catch (e) { setSyncError(e.message || String(e)); setProfile(null); }
   }, []);
 
   useEffect(() => {
-    if (!session) { setProfile(undefined); setTeam([]); return; }
+    if (!session) { setProfile(undefined); setTeam([]); setConfig(null); setLocks([]); return; }
     loadPeople(session.user);
     const ch = supabase.channel("allbee-people")
-      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => loadPeople(session.user));
+      .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, () => loadPeople(session.user))
+      .on("postgres_changes", { event: "*", schema: "public", table: "app_config" }, () => loadPeople(session.user))
+      .on("postgres_changes", { event: "*", schema: "public", table: "fin_locks" }, async () => setLocks(await fetchLocks()));
     ch.subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [session, loadPeople]);
@@ -2573,6 +3658,18 @@ export default function App() {
     ch.subscribe();
     return () => { supabase.removeChannel(ch); };
   }, [session, reload]);
+
+  // If an admin changes my role or the modules I'm granted while I'm signed in,
+  // my row-level access changes — so refetch everything under the new permissions
+  // (otherwise a freshly-granted module would show up empty until a refresh).
+  const accessKey = `${profile?.role || ""}|${JSON.stringify(profile?.perms?.modules || [])}`;
+  const accessKeyRef = useRef(accessKey);
+  useEffect(() => {
+    if (accessKeyRef.current !== accessKey) {
+      accessKeyRef.current = accessKey;
+      if (session && db) reload();
+    }
+  }, [accessKey, session, db, reload]);
 
   // mutate(updater, auditEntryOrNull) — updates the screen instantly, then
   // saves only the rows that changed. The other staff member's screen updates live.
@@ -2648,6 +3745,16 @@ export default function App() {
     catch (e) { setSyncError(e.message || String(e)); }
   }, [session, loadPeople]);
 
+  // first-login profile completion + T&C acceptance (both write to my own row)
+  const saveMyProfile = useCallback((patch) => changeProfile(me.id, patch), [changeProfile, me.id]);
+  const acceptTnc = useCallback((v) => changeProfile(me.id, { tnc_version: v }), [changeProfile, me.id]);
+  // publish/edit the Terms (admins): bump the version so everyone re-accepts
+  const saveTnc = useCallback(async (body) => {
+    const next = Number(config?.tnc_version || 0) + 1;
+    await saveConfig({ tnc_body: body, tnc_version: next });
+    if (session) setConfig(await fetchConfig());
+  }, [config, session]);
+
   const signOut = async () => { setUserMenu(false); await supabase.auth.signOut(); };
 
   const bal = useMemo(() => (db ? balances(db) : { Haji: 0, Alim: 0, company: 0 }), [db]);
@@ -2697,20 +3804,39 @@ export default function App() {
     }, { action: `${entry.id ? "updated" : "added"} ${entry.kind} ${money(entry.amount)}${entry.client ? " · " + entry.client : ""}${shareNote}`, module: "Accounts" });
   };
 
-  const saveTask = (task, fromConcept) => {
+  const saveTask = async (task, fromConcept) => {
     const isUpdate = task.id && db.tasks.some((t) => t.id === task.id);
+    let t = task;
+    if (!isUpdate && t.num == null) {
+      const n = await nextTaskNumber();        // global counter — numbers are never reused
+      if (n != null) t = { ...t, num: n };
+    }
     mutate((d) => {
       let next = { ...d };
-      if (isUpdate) next.tasks = d.tasks.map((t) => t.id === task.id ? task : t);
-      else next.tasks = [...d.tasks, task];
+      if (isUpdate) next.tasks = d.tasks.map((x) => x.id === t.id ? t : x);
+      else next.tasks = [...d.tasks, t];
       if (fromConcept) next.concepts = d.concepts.filter((c) => c.id !== fromConcept);
       return next;
-    }, isAdmin ? { action: `${isUpdate ? "updated" : "created"} task "${task.title}"`, module: "Tasks" } : null);
+    }, isAdmin ? { action: `${isUpdate ? "updated" : "created"} task "${t.title}"${!isUpdate && t.num ? ` (#${t.num})` : ""}`, module: "Tasks" } : null);
   };
 
   const saveGeneric = (coll, item, label) => {
-    mutate((d) => ({ ...d, [coll]: d[coll].some((x) => x.id === item.id) ? d[coll].map((x) => x.id === item.id ? item : x) : [...d[coll], item] }),
-      { action: `${db[coll].some((x) => x.id === item.id) ? "updated" : "added"} ${label}`, module: label === "project" ? "Projects" : label === "student" ? "Courses" : label === "marketing client" ? "Marketing" : "Concepts" });
+    let toSave = item;
+    // staff-created projects need an admin's approval before they count as active
+    if (coll === "projects" && !db.projects.some((x) => x.id === item.id)) {
+      toSave = { ...item, approvalStatus: isAdmin ? "approved" : "pending", createdById: me.id, ownerName: currentUser };
+    }
+    mutate((d) => ({ ...d, [coll]: d[coll].some((x) => x.id === toSave.id) ? d[coll].map((x) => x.id === toSave.id ? toSave : x) : [...d[coll], toSave] }),
+      { action: `${db[coll].some((x) => x.id === item.id) ? "updated" : "added"} ${label}${coll === "projects" && !isAdmin && !db.projects.some((x) => x.id === item.id) ? " (awaiting approval)" : ""}`, module: label === "project" ? "Projects" : label === "student" ? "Courses" : label === "marketing client" ? "Marketing" : "Concepts" });
+  };
+
+  // CRM / collaboration / finance rows: stamp the owner + author on first save.
+  const saveOwned = (coll, item) => {
+    const isUpdate = db[coll].some((x) => x.id === item.id);
+    const row = isUpdate ? item : { ...item, ownerId: me.id, owner: currentUser, by: currentUser };
+    mutate((d) => ({ ...d, [coll]: isUpdate ? d[coll].map((x) => x.id === item.id ? row : x) : [...d[coll], row] }),
+      { action: `${isUpdate ? "updated" : "added"} ${MODULE_LABEL[coll] || coll}`, module: MODULE_LABEL[coll] || coll });
+    setModal(null);
   };
 
   const Loading = ({ note }) => (
@@ -2727,44 +3853,72 @@ export default function App() {
   if (profile === undefined) return <Loading note="Signing you in…" />;
   if (profile && profile.active === false)
     return <Blocked isDark={isDark} name={currentUser} onSignOut={signOut} />;
+  // portal clients get their own surface and skip the internal profile/T&C gates
+  if (role === "client") {
+    if (loading || !db) return <Loading note="Loading your portal…" />;
+    return <ClientPortal db={db} profile={profile} signOut={signOut} isDark={isDark} />;
+  }
+  // first login: require the core profile details before anything else
+  if (profile && (!profile.mobile || !profile.dob))
+    return <ProfileSetup profile={profile} onSave={saveMyProfile} onSignOut={signOut} isDark={isDark} />;
+  // then the Terms gate for accountants / staff / interns until they accept the
+  // current published version
+  const tncVersion = Number(config?.tnc_version || 0);
+  const mustAcceptTnc = tncVersion > 0 && TNC_ROLES.includes(role) && Number(profile?.tnc_version || 0) < tncVersion;
+  if (profile && mustAcceptTnc)
+    return <TermsGate body={config?.tnc_body || ""} version={tncVersion} onAccept={acceptTnc} onSignOut={signOut} isDark={isDark} />;
   if (loading || !db) return <Loading />;
 
   const teamNames = team.length ? team.map((p) => p.name) : USERS;
-  const visibleNav = NAV.filter((n) => isAdmin || n[3] !== "admin");
-  const allowed = isAdmin ? null : new Set(["dashboard", "tasks", "attendance", "leave", "updates"]);
-  const safeRoute = !allowed || allowed.has(route) ? route : "dashboard";
+  const visibleNav = NAV.filter((n) => navAllowed(n[3], role, profile?.perms || {}));
+  const allowedRoutes = new Set(visibleNav.map((n) => n[0]));
+  const safeRoute = allowedRoutes.has(route) ? route : "dashboard";
   const detailTask = taskDetailId ? db.tasks.find((t) => t.id === taskDetailId) : null;
   const routeTitle =
-    accountUser && isAdmin ? `${accountUser} — account` :
+    accountUser && canFinance ? `${accountUser} — account` :
     taskDetailId ? (detailTask ? detailTask.title : "Task") :
     NAV.find((n) => n[0] === safeRoute)?.[1] || "";
   const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || t.assignedTo === currentUser)).length;
+  const portalClients = team.filter((p) => p.role === "client");
+  const unseenAnn = db.announcements.filter((a) => !profile?.notif_seen_at || (a.createdAt || 0) > new Date(profile.notif_seen_at).getTime()).length;
 
   const renderPage = () => {
     // full-page detail views take precedence over the tab routes
     if (taskDetailId) return <TaskDetail db={db} taskId={taskDetailId} me={me} isAdmin={isAdmin} currentUser={currentUser} mutate={mutate} openModal={openModal} removeItem={removeItem} goBack={goBackDetail} />;
-    if (accountUser && isAdmin) return <AccountFull db={db} user={accountUser} goBack={goBackDetail} />;
+    if (accountUser && canFinance) return <AccountFull db={db} user={accountUser} goBack={goBackDetail} />;
 
     switch (safeRoute) {
       case "dashboard":
-        return isAdmin
-          ? <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} />
-          : <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} />;
+        return (role === "staff" || role === "intern")
+          ? <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} />
+          : <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} showMoney={canFinance} showOps={isAdmin} />;
       case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} removeItem={removeItem} />;
       case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} />;
-      case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} />;
-      case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} locks={locks} lockPeriod={lockPeriod} unlockPeriod={unlockPeriod} isSuper={isSuper} currentUser={currentUser} />;
+      case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} isSuper={isSuper} currentUser={currentUser} />;
       case "progress": return <Progress db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} />;
       case "concepts": return <Concepts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
-      case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
-      case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
-      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} />;
+      case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
+      case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
+      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} />;
+      case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "portal-posts": return <PortalPosts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
+      case "planned": return <Planned db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} openIncome={openIncome} canFinance={canFinance} />;
+      case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "chat": return <Chat db={db} mutate={mutate} me={me} />;
+      case "performance": return <Performance db={db} team={team} />;
+      case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={profile?.role} teamCount={team.length} sessionEmail={session?.user?.email} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} />;
       default: return null;
     }
   };
@@ -2800,16 +3954,21 @@ export default function App() {
             <header className="topbar">
               <button className="iconbtn hamburger" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu"><Menu size={18} /></button>
               <div><h2>{routeTitle}</h2><div className="topbar-sub">ALLBEE Solutions · internal</div></div>
-              {isAdmin && (
+              {canFinance && (
                 <div className="company-pill">
                   <div><div className="lbl">Company balance</div><div className="val mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div></div>
                 </div>
               )}
               <div className="usermenu">
+                <button className="iconbtn" title="Announcements" style={{ position: "relative", marginRight: 4 }}
+                  onClick={() => { go("announcements"); if (me.id) changeProfile(me.id, { notif_seen_at: new Date().toISOString() }); }}>
+                  <Bell size={18} />
+                  {unseenAnn > 0 && <span className="badge pri" style={{ position: "absolute", top: -5, right: -5, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, lineHeight: "16px" }}>{unseenAnn}</span>}
+                </button>
                 <div className="userchip" onClick={() => setUserMenu((v) => !v)}>
                   <div className="avatar" style={{ background: avatarColor(currentUser) }}>{currentUser[0]}</div>
                   <span className="userchip-name">{currentUser}</span>
-                  <span className={"role-badge " + (isAdmin ? "admin" : "staff")}>{isAdmin ? "Admin" : "Staff"}</span>
+                  <span className={"role-badge " + (role || "staff")}>{ROLE_LABEL[role] || "Staff"}</span>
                 </div>
                 {userMenu && (
                   <div className="dropdown" onMouseLeave={() => setUserMenu(false)}>
@@ -2829,18 +3988,28 @@ export default function App() {
         {/* MODALS */}
         {modal?.type === "income" && <ShareForm kind="income" initial={modal.initial} currentUser={currentUser} onSave={(e) => saveShare(e, modal.source)} onClose={() => setModal(null)} />}
         {modal?.type === "expense" && <ShareForm kind="expense" initial={modal.initial} currentUser={currentUser} onSave={(e) => saveShare(e, modal.source)} onClose={() => setModal(null)} />}
-        {modal?.type === "withdraw" && <WithdrawForm balances={bal} defaultUser={currentUser} onSave={(w) => mutate((d) => ({ ...d, withdrawals: [...d.withdrawals, w] }), { action: `withdrew ${money(w.amount)}`, module: "Withdrawals" })} onClose={() => setModal(null)} />}
+        {modal?.type === "withdraw" && <WithdrawForm balances={bal} defaultUser={currentUser} onSave={(w) => mutate((d) => ({ ...d, withdrawals: [...d.withdrawals, { ...w, status: isSuper ? "approved" : "pending" }] }), { action: `recorded withdrawal of ${money(w.amount)}${isSuper ? "" : " (awaiting approval)"}`, module: "Withdrawals" })} onClose={() => setModal(null)} />}
         {modal?.type === "task" && <TaskForm initial={modal.initial} currentUser={currentUser} team={teamNames} isAdmin={isAdmin} onSave={(t) => saveTask(t, modal.fromConcept)} onClose={() => setModal(null)} />}
         {modal?.type === "leave" && <LeaveForm initial={modal.initial} me={me} onSave={(l) => mutate((d) => ({ ...d, leave: d.leave.some((x) => x.id === l.id) ? d.leave.map((x) => x.id === l.id ? l : x) : [...d.leave, l] }), null)} onClose={() => setModal(null)} />}
         {modal?.type === "project" && <ProjectForm initial={modal.initial} onSave={(p) => saveGeneric("projects", p, "project")} onClose={() => setModal(null)} />}
         {modal?.type === "student" && <StudentForm initial={modal.initial} onSave={(s) => saveGeneric("students", s, "student")} onClose={() => setModal(null)} />}
         {modal?.type === "marketing" && <MarketingForm initial={modal.initial} onSave={(m) => saveGeneric("marketing", m, "marketing client")} onClose={() => setModal(null)} />}
         {modal?.type === "concept" && <ConceptForm initial={modal.initial} onSave={(c) => saveGeneric("concepts", c, "idea")} onClose={() => setModal(null)} />}
+        {modal?.type === "lead" && <LeadForm initial={modal.initial} onSave={(x) => saveOwned("leads", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "client" && <ClientForm initial={modal.initial} existing={db.clients} onSave={(x) => { saveOwned("clients", x); }} onClose={() => setModal(null)} />}
+        {modal?.type === "quotation" && <QuotationForm initial={modal.initial} clients={db.clients} portalClients={portalClients} onSave={(x) => saveOwned("quotations", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "planned" && <PlannedForm initial={modal.initial} onSave={(x) => saveOwned("planned", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(x) => saveOwned("vault", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "document" && <DocForm initial={modal.initial} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "knowledge" && <KbForm initial={modal.initial} onSave={(x) => saveOwned("knowledge", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "reward" && <RewardForm initial={modal.initial} team={team} onSave={(x) => saveOwned("rewards", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "announcement" && <AnnouncementForm initial={modal.initial} onSave={(x) => saveOwned("announcements", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "portalPost" && <PortalPostForm initial={modal.initial} portalClients={portalClients} onSave={(x) => saveOwned("portal_posts", x)} onClose={() => setModal(null)} />}
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
 
-        {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={isAdmin ? openAccount : undefined} />}
+        {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={canFinance ? openAccount : undefined} />}
       </div>
     </ErrorBoundary>
   );
