@@ -1,60 +1,73 @@
 -- ============================================================================
--- ALLBEE — FIX: task saving (RLS) + restore Haji & Alim to super admin
--- Run once: Supabase Dashboard -> SQL Editor -> New query -> paste -> Run.
--- Idempotent and safe to re-run (drop-then-create / guarded).
+-- ALLBEE — FEATURES: staff document uploads + staff/client approval
+-- Run once in Supabase → SQL Editor (after allbee-tasks-fix.sql).
+-- Idempotent and safe to re-run.
 -- ============================================================================
 
--- ── 1) TASKS — let the ASSIGNEE save their own Accept / Start / Complete ─────
--- The app persists every task change with upsert (INSERT ... ON CONFLICT), so
--- Postgres enforces the INSERT "WITH CHECK" even when it's really an update.
--- The old policy allowed only an admin or the task's CREATOR (assignedBy) to
--- write, so a staff/intern ASSIGNEE could never save a status change on a task
--- somebody else created. That is the exact cause of:
---     "new row violates row-level security policy for table tasks"
--- Adding the assignee (assignedTo) to the check fixes it. SELECT and DELETE are
--- left as they were (delete stays admin/creator only).
-drop policy if exists tasks_ins on public.tasks;
-create policy tasks_ins on public.tasks for insert to authenticated
-  with check (
-    public.is_admin()
-    or (data->>'assignedBy') = public.current_name()
-    or (data->>'assignedTo') = public.current_name()
-  );
+-- ── 1) DOCUMENTS — let any internal user (staff/intern/admin) upload ────────
+-- Was admin-only. Now: anyone internal may ADD a document; only an admin or the
+-- person who uploaded it may edit/delete it. Clients still can't see Documents.
+drop policy if exists documents_wr  on public.documents;   -- old admin-only catch-all
+drop policy if exists documents_ins on public.documents;
+drop policy if exists documents_upd on public.documents;
+drop policy if exists documents_del on public.documents;
+create policy documents_ins on public.documents for insert to authenticated
+  with check (not public.is_client());
+create policy documents_upd on public.documents for update to authenticated
+  using      (public.is_admin() or (data->>'ownerId') = auth.uid()::text)
+  with check (public.is_admin() or (data->>'ownerId') = auth.uid()::text);
+create policy documents_del on public.documents for delete to authenticated
+  using      (public.is_admin() or (data->>'ownerId') = auth.uid()::text);
+-- (documents_sel — internal-only read — is left exactly as it was.)
 
-drop policy if exists tasks_upd on public.tasks;
-create policy tasks_upd on public.tasks for update to authenticated
-  using (
-    public.is_admin()
-    or (data->>'assignedTo') = public.current_name()
-    or (data->>'assignedBy') = public.current_name()
-  )
-  with check (
-    public.is_admin()
-    or (data->>'assignedTo') = public.current_name()
-    or (data->>'assignedBy') = public.current_name()
-  );
+-- ── 2) APPROVAL — new staff & clients wait for a partner to approve ─────────
+-- Adds an `approved` flag. Default TRUE so every EXISTING person stays approved
+-- and nobody is locked out. The sign-up trigger below sets it FALSE for brand-new
+-- staff/client accounts, so only people who join from now on need approving.
+alter table public.profiles add column if not exists approved boolean not null default true;
 
--- ── 2) ROLES — Haji & Alim are PERMANENT super admins ───────────────────────
--- The profiles_guard trigger blocks role changes from anyone who isn't already
--- a super admin (and the SQL editor has no auth.uid(), so it counts as "not
--- admin" and the change is silently reverted). We lift the guard for this one
--- statement, restore the two partners, then put the guard straight back.
---
--- VERIFY FIRST — run this and confirm these are the right two rows:
---     select id, name, email, role, status from public.profiles
---     where lower(name) in ('haji','alim');
--- If their profile names are NOT literally "Haji"/"Alim", match by email
--- instead, e.g.  where email in ('haji@allbee...','alim@allbee...').
+-- Sign-up: super admins (admin code) are auto-approved; staff & clients are not.
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_name   text := coalesce(nullif(new.raw_user_meta_data->>'name',''), split_part(new.email,'@',1));
+  v_code   text := new.raw_user_meta_data->>'admin_code';
+  v_intent text := new.raw_user_meta_data->>'role_intent';
+  v_admin  text;
+  v_role   text := 'staff';
+begin
+  select value into v_admin from public.app_config where key = 'admin_signup_code';
+  if v_code is not null and v_admin is not null and v_code = v_admin then
+    v_role := 'superadmin';
+  elsif v_intent = 'client' then
+    v_role := 'client';
+  end if;
+  insert into public.profiles (id, name, email, role, approved)
+  values (new.id, v_name, new.email, v_role, v_role = 'superadmin')
+  on conflict (id) do nothing;
+  return new;
+end $$;
 
-alter table public.profiles disable trigger profiles_guard_trg;
-update public.profiles
-   set role = 'superadmin', active = true, status = 'active'
- where lower(name) in ('haji', 'alim');     -- ← adjust to email if names differ
-alter table public.profiles enable trigger profiles_guard_trg;
+-- Field guard: a non-admin must never flip their OWN `approved` flag (that would
+-- bypass approval). Re-defined to also pin `approved` for non-admin edits.
+create or replace function public.profiles_guard()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  caller_admin boolean := public.is_admin();
+  caller_super boolean := public.is_superadmin();
+begin
+  if old.role = 'superadmin' and not caller_super then
+    return old;  -- a partner's row is untouchable except by a partner
+  end if;
+  if not caller_admin then
+    new.role := old.role; new.active := old.active; new.status := old.status;
+    new.perms := old.perms; new.approved := old.approved;   -- ← approval is admin-only
+  end if;
+  if new.role = 'superadmin' and old.role <> 'superadmin' and not caller_super then
+    new.role := old.role;  -- only a partner can promote someone to partner
+  end if;
+  return new;
+end $$;
 
--- ── confirm the result ──────────────────────────────────────────────────────
-select name, role, status, active
-from public.profiles
-where lower(name) in ('haji', 'alim')
-order by name;
-
+-- ── confirm ─────────────────────────────────────────────────────────────────
+select name, email, role, approved from public.profiles order by created_at;
