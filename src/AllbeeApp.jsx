@@ -118,6 +118,17 @@ const sameMonth = (iso, ref = new Date()) => {
   return d.getFullYear() === ref.getFullYear() && d.getMonth() === ref.getMonth();
 };
 
+// Subtle haptic feedback — only for meaningful actions (task accept/complete,
+// leave & withdrawal decisions, notifications). No-op where unsupported.
+function haptic(pattern = 12) {
+  try { if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(pattern); } catch { /* ignore */ }
+}
+const minsSince = (ts) => (Date.now() - (ts || 0)) / 60000;
+const withinMinutes = (ts, m) => minsSince(ts) <= m;
+// Sum worked hours across completed attendance sessions (ignores open ones).
+const sumHours = (rows) => rows.reduce((s, a) => s + (a.checkOut ? (hoursBetween(a.checkIn, a.checkOut) || 0) : 0), 0);
+const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day = (d.getDay() + 6) % 7; d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - day); return d; };
+
 /* ── data layer (Supabase) ────────────────────────────────────────────────
    Architecture preserved from the prototype: the whole database is held in
    memory as one `db` object and all derived values are computed in JS. Here
@@ -318,6 +329,39 @@ const taskAssignees = (t) => (t.assignedTo === COMBINED ? USERS.slice() : [t.ass
 const canActOnTask = (t, name) => taskAssignees(t).includes(name);
 // Who may edit / delete / monitor a task: an admin or the person who created it.
 const canEditTask = (t, name, isAdmin) => isAdmin || t.assignedBy === name;
+
+// ── dual-accept for "Haji & Alim" tasks ───────────────────────────────────
+// A task assigned to BOTH partners needs each of them to Accept before it can
+// Start; a single-assignee task needs only that one person. Either may Complete.
+const taskAccepts = (t) => (Array.isArray(t.accepts) ? t.accepts : []);
+
+// The workflow patch produced when `by` clicks the action button. Returns only
+// the fields to merge into the task. For a combined task still gathering both
+// partners' acceptances it records the acceptance and keeps the status "Created".
+function nextTaskState(t, by) {
+  const accepts = taskAccepts(t);
+  if (t.status === "Created" && t.assignedTo === COMBINED) {
+    const merged = accepts.includes(by) ? accepts : [...accepts, by];
+    if (!USERS.every((u) => merged.includes(u))) {
+      return { accepts: merged, history: [...(t.history || []), { status: `Accepted by ${by}`, at: Date.now(), by }] };
+    }
+    return { status: "Accepted", accepts: merged, progress: t.progress || 0, history: [...(t.history || []), { status: "Accepted", at: Date.now(), by }] };
+  }
+  const i = TASK_FLOW.indexOf(t.status);
+  const next = TASK_FLOW[Math.min(i + 1, TASK_FLOW.length - 1)];
+  const progress = next === "Completed" ? 100 : next === "In Progress" ? Math.max(t.progress || 0, 25) : (t.progress || 0);
+  const merged = next === "Accepted" && !accepts.includes(by) ? [...accepts, by] : accepts;
+  return { status: next, progress, accepts: merged, history: [...(t.history || []), { status: next, at: Date.now(), by }] };
+}
+// Label + disabled state for the workflow button. `null` means no action (done).
+function taskAction(t, by) {
+  if (t.status === "Completed") return null;
+  if (t.status === "Created" && t.assignedTo === COMBINED && taskAccepts(t).includes(by)) {
+    const waiting = USERS.filter((u) => !taskAccepts(t).includes(u)).join(" & ");
+    return { label: `Waiting for ${waiting}`, disabled: true };
+  }
+  return { label: t.status === "Created" ? "Accept" : t.status === "Accepted" ? "Start" : "Complete", disabled: false };
+}
 // A readable, ordered activity timeline. Falls back to a sensible reconstruction
 // for tasks created before history tracking existed.
 function taskTimeline(t) {
@@ -1504,7 +1548,7 @@ function Accounts({ db, bal, mutate, openModal, openBalance, removeItem, locks =
               <div className="hint-line" style={{ fontSize: 12 }}>Lock a closed month to freeze its books. Only partners can lock or unlock.</div>
             </div>
             <button className={"btn sm " + (lockedThis ? "" : "primary")} onClick={() => doLock(thisPeriod, !lockedThis)}>
-              {lockedThis ? <><Unlock size={13} />Unlock {fmtPeriod(thisPeriod)}</> : <><LockIcon size={13} />Lock {fmtPeriod(thisPeriod)}</>}
+              {lockedThis ? <><UnlockIcon size={13} />Unlock {fmtPeriod(thisPeriod)}</> : <><LockIcon size={13} />Lock {fmtPeriod(thisPeriod)}</>}
             </button>
           </div>
           {locks.length > 0 && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
@@ -1568,8 +1612,8 @@ function Withdrawals({ db, bal, mutate, openModal, removeItem, isSuper, currentU
   const del = (w) => removeItem("withdrawals", w, { name: `Withdrawal ${money(w.amount)} · ${w.user}`, audit: `deleted a withdrawal of ${money(w.amount)}` });
   const statusOf = (w) => w.status || "approved"; // legacy rows (no status) already moved money
   const tone = (s) => s === "approved" ? "pos" : s === "rejected" ? "neg" : "pri";
-  const setStatus = (w, s) => mutate((d) => ({ ...d, withdrawals: d.withdrawals.map((x) => x.id === w.id ? { ...x, status: s, approvedBy: currentUser, approvedAt: Date.now() } : x) }),
-    { action: `${s === "approved" ? "approved" : "rejected"} withdrawal of ${money(w.amount)} for ${w.user}`, module: "Withdrawals" });
+  const setStatus = (w, s) => { haptic(s === "approved" ? 12 : [10, 30, 10]); mutate((d) => ({ ...d, withdrawals: d.withdrawals.map((x) => x.id === w.id ? { ...x, status: s, approvedBy: currentUser, approvedAt: Date.now() } : x) }),
+    { action: `${s === "approved" ? "approved" : "rejected"} withdrawal of ${money(w.amount)} for ${w.user}`, module: "Withdrawals" }); };
   const pending = list.filter((w) => statusOf(w) === "pending").length;
   return (
     <div className="content">
@@ -1626,18 +1670,20 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
     let r = [...db.tasks].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : (t.assignedTo === currentUser || t.assignedTo === COMBINED));
     if (filter === "active") r = r.filter((t) => t.status !== "Completed");
+    else if (filter === "progress") r = r.filter((t) => t.status === "In Progress");
     else if (filter === "done") r = r.filter((t) => t.status === "Completed");
     return r;
   }, [db.tasks, filter, scope, isAdmin, currentUser]);
 
   const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
 
-  // advance is only ever called by the assigned person (button is gated below)
+  // advance is only ever called by the assigned person (button is gated below).
+  // A task assigned to both partners needs each of them to Accept before Start.
   const advance = (t) => {
-    const i = TASK_FLOW.indexOf(t.status); const next = TASK_FLOW[Math.min(i + 1, TASK_FLOW.length - 1)];
-    const progress = next === "Completed" ? 100 : next === "In Progress" ? Math.max(t.progress || 0, 25) : t.progress || 0;
-    const history = [...(t.history || []), { status: next, at: Date.now(), by: currentUser }];
-    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: next, progress, history } : x) }), auditFor(`moved "${t.title}" to ${next}`));
+    const patch = nextTaskState(t, currentUser);
+    const note = patch.status ? `moved "${t.title}" to ${patch.status}` : `accepted "${t.title}"`;
+    haptic(patch.status === "Completed" ? [10, 40, 10] : 12);
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, ...patch } : x) }), auditFor(note));
   };
   const undo = (t) => {
     const history = [...(t.history || []), { status: "In Progress", at: Date.now(), by: currentUser }];
@@ -1649,14 +1695,13 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
     body: `This moves "${t.title}" to Recently deleted.`, note: "You can restore it within 60 days.",
     onConfirm: () => removeItem("tasks", t, { name: t.title, audit: `deleted task "${t.title}"` }),
   });
-  const actLabel = (s) => (s === "Created" ? "Accept" : s === "Accepted" ? "Start" : "Complete");
 
   return (
     <div className="content">
       <div className="page-head"><h3>{isAdmin ? "Tasks" : "My tasks"}</h3><span className="spacer" />
         <button className="btn primary" onClick={() => openModal({ type: "task" })}><Plus size={16} />New task</button></div>
       <div className="toolbar">
-        <div className="seg">{[["active", "Active"], ["done", "Completed"], ["all", "All"]].map(([k, l]) => <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}</div>
+        <div className="seg">{[["all", "All"], ["active", "Active"], ["progress", "Progress"], ["done", "Completed"]].map(([k, l]) => <button key={k} className={filter === k ? "on" : ""} onClick={() => setFilter(k)}>{l}</button>)}</div>
         {!isAdmin && <div className="seg">{[["mine", "Assigned to me"], ["assigned", "I assigned"]].map(([k, l]) => <button key={k} className={scope === k ? "on" : ""} onClick={() => setScope(k)}>{l}</button>)}</div>}
       </div>
 
@@ -1668,6 +1713,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
         ) : list.map((t) => {
           const canAct = canActOnTask(t, currentUser);
           const canEdit = canEditTask(t, currentUser, isAdmin);
+          const act = canAct ? taskAction(t, currentUser) : null;
           return (
             <div key={t.id} className="item-row">
               <div className="item-main">
@@ -1685,7 +1731,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
                 </div>
               </div>
               <div className="row-actions">
-                {canAct && t.status !== "Completed" && <button className="btn sm primary" onClick={() => advance(t)}>{actLabel(t.status)}<ArrowRight size={13} /></button>}
+                {act && <button className="btn sm primary" disabled={act.disabled} onClick={() => { if (!act.disabled) advance(t); }}>{act.label}<ArrowRight size={13} /></button>}
                 {t.status === "Completed" && (canAct || canEdit) && <button className="btn sm" onClick={() => undo(t)}><Undo2 size={13} />Undo</button>}
                 <button className="iconbtn" style={{ width: 32, height: 32 }} title="Open task" onClick={() => openTask(t.id)}><ExternalLink size={14} /></button>
                 {canEdit && <button className="iconbtn" style={{ width: 32, height: 32 }} title="Edit" onClick={() => openModal({ type: "task", initial: t })}><Pencil size={14} /></button>}
@@ -1755,10 +1801,10 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
   const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
 
   const advance = () => {
-    const i = TASK_FLOW.indexOf(t.status); const next = TASK_FLOW[Math.min(i + 1, TASK_FLOW.length - 1)];
-    const progress = next === "Completed" ? 100 : next === "In Progress" ? Math.max(t.progress || 0, 25) : t.progress || 0;
-    const history = [...(t.history || []), { status: next, at: Date.now(), by: currentUser }];
-    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, status: next, progress, history } : x) }), auditFor(`moved "${t.title}" to ${next}`));
+    const patch = nextTaskState(t, currentUser);
+    const note = patch.status ? `moved "${t.title}" to ${patch.status}` : `accepted "${t.title}"`;
+    haptic(patch.status === "Completed" ? [10, 40, 10] : 12);
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, ...patch } : x) }), auditFor(note));
   };
   const undo = () => {
     const history = [...(t.history || []), { status: "In Progress", at: Date.now(), by: currentUser }];
@@ -1784,7 +1830,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
   });
 
   const timeline = taskTimeline(t);
-  const actLabel = t.status === "Created" ? "Accept" : t.status === "Accepted" ? "Start" : "Complete";
+  const act = canAct ? taskAction(t, currentUser) : null;
   const lbl = { display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, fontWeight: 700, color: "var(--ink)", marginBottom: 12 };
   const colorFor = (n) => (n === COMBINED ? "var(--ink)" : avatarColor(n));
   const META = [
@@ -1809,7 +1855,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {canAct && t.status !== "Completed" && <button className="btn primary" onClick={advance}>{actLabel}<ArrowRight size={14} /></button>}
+          {act && <button className="btn primary" disabled={act.disabled} onClick={() => { if (!act.disabled) advance(); }}>{act.label}<ArrowRight size={14} /></button>}
           {t.status === "Completed" && canCollaborate && <button className="btn" onClick={undo}><Undo2 size={15} />Undo</button>}
           {canEdit && <button className="btn" onClick={() => openModal({ type: "task", initial: t })}><Pencil size={14} />Edit</button>}
           {canEdit && <button className="btn danger" onClick={askDelete}><Trash2 size={14} />Delete</button>}
@@ -1959,8 +2005,10 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
   );
 }
 
-function Projects({ db, mutate, openModal, openIncome, removeItem, canFinance, isAdmin }) {
+function Projects({ db, mutate, openModal, openIncome, removeItem, canFinance, isAdmin, me }) {
   const list = [...db.projects].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  // Staff may edit a project they created for 7 days; after that it's admin-only.
+  const canEditP = (p) => isAdmin || (p.createdById === me?.id && (Date.now() - (p.createdAt || 0)) < 7 * 86400000);
   const setStage = (p, stage) => mutate((d) => ({ ...d, projects: d.projects.map((x) => x.id === p.id ? { ...x, stage } : x) }), { action: `set "${p.name}" to ${stage}`, module: "Projects" });
   const appr = (p) => p.approvalStatus || "approved"; // legacy projects count as approved
   const setApproval = (p, s) => mutate((d) => ({ ...d, projects: d.projects.map((x) => x.id === p.id ? { ...x, approvalStatus: s, approvedAt: Date.now() } : x) }), { action: `${s === "approved" ? "approved" : "rejected"} project "${p.name}"`, module: "Projects" });
@@ -1985,8 +2033,9 @@ function Projects({ db, mutate, openModal, openIncome, removeItem, canFinance, i
                 {isAdmin && appr(p) !== "approved" && <button className="btn sm primary" onClick={() => setApproval(p, "approved")}><Check size={13} />Approve</button>}
                 {isAdmin && appr(p) === "pending" && <button className="btn sm danger" onClick={() => setApproval(p, "rejected")}><X size={13} />Reject</button>}
                 {canFinance && <button className="btn sm primary" onClick={() => openIncome({ client: p.client, project: p.name, amount: p.cost, category: "Project" })}>Record income</button>}
-                <button className="btn sm" onClick={() => openModal({ type: "project", initial: p })}><Pencil size={13} /></button>
-                <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete project?", body: `Delete "${p.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>
+                {canEditP(p) && <button className="btn sm" onClick={() => openModal({ type: "project", initial: p })}><Pencil size={13} /></button>}
+                {canEditP(p) && <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete project?", body: `Delete "${p.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>}
+                {!canEditP(p) && <span className="hint-line" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}><LockIcon size={11} />Admin-only after 7 days</span>}
               </div>
             </div>
           ))}
@@ -2200,7 +2249,9 @@ function TncManager({ config, saveTnc }) {
 ══════════════════════════════════════════════════════════════════════ */
 function StaffDashboard({ db, me, go, mutate, openModal }) {
   const today = todayISO();
-  const att = attendanceFor(db, me.id, today);
+  const todays = db.attendance.filter((a) => a.userId === me.id && a.date === today);
+  const openSess = todays.find((a) => !a.checkOut);
+  const todayH = sumHours(todays);
   const leaveToday = onApprovedLeave(db, me.id, today);
   const myOpen = db.tasks.filter((t) => t.assignedTo === me.name && t.status !== "Completed");
   const myPendingLeave = db.leave.filter((l) => l.userId === me.id && l.status === "Pending");
@@ -2208,8 +2259,10 @@ function StaffDashboard({ db, me, go, mutate, openModal }) {
   const hr = new Date().getHours();
   const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
 
-  const checkIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
-  const checkOut = () => mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === att.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null);
+  const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
+  const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null); };
+  const checkIn = () => openModal({ type: "okConfirm", title: "Check in?", body: "Type OK to confirm your check-in.", actionLabel: "Check in", icon: <LogIn size={15} />, onConfirm: () => { haptic(12); doCheckIn(); } });
+  const checkOut = () => openModal({ type: "okConfirm", title: "Check out?", body: "Type OK to confirm your check-out.", actionLabel: "Check out", icon: <CheckCircle2 size={15} />, onConfirm: () => { haptic(12); doCheckOut(); } });
 
   return (
     <div className="content">
@@ -2220,11 +2273,11 @@ function StaffDashboard({ db, me, go, mutate, openModal }) {
         <div style={{ flex: 1, minWidth: 180 }}>
           <div className="lbl"><Clock size={14} /> Today · {fmtDate(today)}</div>
           <div style={{ fontWeight: 700, fontSize: 16, marginTop: 4 }}>
-            {leaveToday ? "On approved leave" : !att ? "Not checked in yet" : att.checkOut ? `Worked ${clockTime(att.checkIn)} – ${clockTime(att.checkOut)}` : `Checked in at ${clockTime(att.checkIn)}`}
+            {leaveToday ? "On approved leave" : openSess ? `Checked in at ${clockTime(openSess.checkIn)}` : todays.length ? `${todays.length} session${todays.length > 1 ? "s" : ""} today · ${todayH.toFixed(1)}h` : "Not checked in yet"}
           </div>
         </div>
-        {!leaveToday && !att && <button className="btn primary" onClick={checkIn}><LogIn size={16} />Check in</button>}
-        {!leaveToday && att && !att.checkOut && <button className="btn primary" onClick={checkOut}><CheckCircle2 size={16} />Check out</button>}
+        {!leaveToday && !openSess && <button className="btn primary" onClick={checkIn}><LogIn size={16} />Check in</button>}
+        {!leaveToday && openSess && <button className="btn primary" onClick={checkOut}><CheckCircle2 size={16} />Check out</button>}
       </div>
 
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", marginBottom: 16 }}>
@@ -2272,16 +2325,24 @@ function attStatus(db, userId, dateISO) {
   return { label: "Present", tone: "pos" };
 }
 
-function Attendance({ db, mutate, me, isAdmin, team }) {
+function Attendance({ db, mutate, me, isAdmin, team, openModal }) {
   const today = todayISO();
   const [date, setDate] = useState(today);
 
   if (!isAdmin) {
-    const att = attendanceFor(db, me.id, today);
+    const mineAll = db.attendance.filter((a) => a.userId === me.id);
+    const todays = mineAll.filter((a) => a.date === today);
+    const openSess = todays.find((a) => !a.checkOut);
     const leaveToday = onApprovedLeave(db, me.id, today);
-    const mine = [...db.attendance].filter((a) => a.userId === me.id).sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 31);
-    const checkIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
-    const checkOut = () => mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === att.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null);
+    const mine = [...mineAll].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60);
+    const weekStart = startOfWeek();
+    const todayH = sumHours(todays);
+    const weekH = sumHours(mineAll.filter((a) => new Date(a.date + "T00:00:00") >= weekStart));
+    const monthH = sumHours(mineAll.filter((a) => sameMonth(a.date)));
+    const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
+    const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null); };
+    const checkIn = () => openModal({ type: "okConfirm", title: "Check in?", body: "Type OK to confirm your check-in.", actionLabel: "Check in", icon: <LogIn size={15} />, onConfirm: () => { haptic(12); doCheckIn(); } });
+    const checkOut = () => openModal({ type: "okConfirm", title: "Check out?", body: "Type OK to confirm your check-out.", actionLabel: "Check out", icon: <CheckCircle2 size={15} />, onConfirm: () => { haptic(12); doCheckOut(); } });
     return (
       <div className="content">
         <div className="page-head"><h3>Attendance</h3></div>
@@ -2289,12 +2350,17 @@ function Attendance({ db, mutate, me, isAdmin, team }) {
           <div style={{ flex: 1, minWidth: 200 }}>
             <div className="lbl"><Clock size={14} /> {fmtDate(today)}</div>
             <div style={{ fontWeight: 700, fontSize: 16, marginTop: 4 }}>
-              {leaveToday ? "You're on approved leave today" : !att ? "Not checked in yet" : att.checkOut ? `${clockTime(att.checkIn)} – ${clockTime(att.checkOut)} · ${hoursBetween(att.checkIn, att.checkOut)?.toFixed(1)}h` : `Checked in at ${clockTime(att.checkIn)}`}
+              {leaveToday ? "You're on approved leave today" : openSess ? `Checked in at ${clockTime(openSess.checkIn)}` : todays.length ? `${todays.length} session${todays.length > 1 ? "s" : ""} · ${todayH.toFixed(1)}h today` : "Not checked in yet"}
             </div>
           </div>
-          {!leaveToday && !att && <button className="btn primary" onClick={checkIn}><LogIn size={16} />Check in</button>}
-          {!leaveToday && att && !att.checkOut && <button className="btn primary" onClick={checkOut}><CheckCircle2 size={16} />Check out</button>}
-          {att && att.checkOut && <span className="badge pos"><Check size={13} /> Done for today</span>}
+          {!leaveToday && !openSess && <button className="btn primary" onClick={checkIn}><LogIn size={16} />Check in</button>}
+          {!leaveToday && openSess && <button className="btn primary" onClick={checkOut}><CheckCircle2 size={16} />Check out</button>}
+        </div>
+
+        <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", marginBottom: 16 }}>
+          <div className="card stat"><div className="lbl"><Clock size={14} /> Today</div><div className="num">{todayH.toFixed(1)}h</div></div>
+          <div className="card stat"><div className="lbl"><CalendarDays size={14} /> This week</div><div className="num">{weekH.toFixed(1)}h</div></div>
+          <div className="card stat"><div className="lbl"><CalendarDays size={14} /> This month</div><div className="num">{monthH.toFixed(1)}h</div></div>
         </div>
 
         <div className="card">
@@ -2384,7 +2450,7 @@ function Leave({ db, mutate, me, isAdmin, openModal }) {
     ? all.filter((l) => filter === "all" ? true : l.status === filter)
     : all.filter((l) => l.userId === me.id);
 
-  const decide = (l, status) => mutate((d) => ({ ...d, leave: d.leave.map((x) => x.id === l.id ? { ...x, status, decidedBy: me.name, decidedAt: Date.now() } : x) }), { action: `${status.toLowerCase()} ${l.userName}'s ${l.type.toLowerCase()} leave`, module: "Leave" });
+  const decide = (l, status) => { haptic(/^app/i.test(status) ? 12 : [10, 30, 10]); mutate((d) => ({ ...d, leave: d.leave.map((x) => x.id === l.id ? { ...x, status, decidedBy: me.name, decidedAt: Date.now() } : x) }), { action: `${status.toLowerCase()} ${l.userName}'s ${l.type.toLowerCase()} leave`, module: "Leave" }); };
   const cancel = (l) => mutate((d) => ({ ...d, leave: d.leave.filter((x) => x.id !== l.id) }), null);
 
   return (
@@ -2430,8 +2496,10 @@ function Leave({ db, mutate, me, isAdmin, openModal }) {
   );
 }
 
-function Updates({ db, mutate, me, isAdmin }) {
+function Updates({ db, mutate, me, isAdmin, removeItem, openModal }) {
   const [text, setText] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [editText, setEditText] = useState("");
   const today = todayISO();
   const all = [...db.updates].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const list = isAdmin ? all : all.filter((u) => u.userId === me.id);
@@ -2440,7 +2508,10 @@ function Updates({ db, mutate, me, isAdmin }) {
     mutate((d) => ({ ...d, updates: [...d.updates, { id: uid(), userId: me.id, userName: me.name, date: today, content, createdAt: Date.now() }] }), null);
     setText("");
   };
-  const del = (u) => mutate((d) => ({ ...d, updates: d.updates.filter((x) => x.id !== u.id) }), null);
+  const startEdit = (u) => { setEditId(u.id); setEditText(u.content); };
+  const saveEdit = (u) => { const c = editText.trim(); if (!c) { setEditId(null); return; } mutate((d) => ({ ...d, updates: d.updates.map((x) => x.id === u.id ? { ...x, content: c, editedAt: Date.now() } : x) }), null); setEditId(null); setEditText(""); };
+  const acknowledge = (u) => { haptic(10); mutate((d) => ({ ...d, updates: d.updates.map((x) => x.id === u.id ? { ...x, ackBy: me.name, ackAt: Date.now() } : x) }), { action: `acknowledged ${u.userName}'s daily update`, module: "Daily updates" }); };
+  const askDelete = (u) => openModal({ type: "deleteConfirm", title: "Delete update?", body: "This moves the update to Recently deleted.", note: "You can restore it within 60 days.", onConfirm: () => removeItem("updates", u, { name: `${u.userName}'s update`, audit: "deleted a daily update" }) });
 
   return (
     <div className="content">
@@ -2465,11 +2536,20 @@ function Updates({ db, mutate, me, isAdmin }) {
             <div className="avatar" style={{ background: avatarColor(u.userName), width: 30, height: 30, fontSize: 12 }}>{u.userName[0]}</div>
             <div className="item-main">
               <div className="item-title" style={{ fontSize: 14 }}><b>{u.userName}</b></div>
-              <div style={{ marginTop: 4, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{u.content}</div>
-              <div className="item-meta" style={{ marginTop: 6 }}><span>{fmtDate(u.date)}</span><span>{fmtTime(u.createdAt)}</span></div>
+              {editId === u.id ? (
+                <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <textarea className="textarea" style={{ minHeight: 64 }} value={editText} onChange={(e) => setEditText(e.target.value)} autoFocus />
+                  <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}><button className="btn sm" onClick={() => { setEditId(null); setEditText(""); }}>Cancel</button><button className="btn sm primary" onClick={() => saveEdit(u)}><Check size={13} />Save</button></div>
+                </div>
+              ) : <div style={{ marginTop: 4, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{u.content}</div>}
+              <div className="item-meta" style={{ marginTop: 6 }}><span>{fmtDate(u.date)}</span><span>{fmtTime(u.createdAt)}</span>{u.editedAt && <span>edited</span>}{u.ackAt && <span style={{ color: "var(--pos)", display: "inline-flex", alignItems: "center", gap: 4 }}><BadgeCheck size={12} />Acknowledged by {u.ackBy || "admin"}</span>}</div>
             </div>
-            {(isAdmin || u.userId === me.id) && (
-              <div className="row-actions"><button className="iconbtn" style={{ width: 32, height: 32 }} onClick={() => del(u)}><Trash2 size={14} /></button></div>
+            {editId !== u.id && (
+              <div className="row-actions">
+                {!isAdmin && u.userId === me.id && withinMinutes(u.createdAt, 30) && <button className="iconbtn" style={{ width: 32, height: 32 }} title="Edit (within 30 min)" onClick={() => startEdit(u)}><Pencil size={14} /></button>}
+                {isAdmin && !u.ackAt && <button className="btn sm" onClick={() => acknowledge(u)}><Check size={13} />Acknowledge</button>}
+                {(isAdmin || u.userId === me.id) && <button className="iconbtn" style={{ width: 32, height: 32 }} onClick={() => askDelete(u)}><Trash2 size={14} /></button>}
+              </div>
             )}
           </div>
         ))}
@@ -3327,9 +3407,10 @@ function Vault({ db, mutate, openModal, removeItem }) {
   );
 }
 
-function Announcements({ db, mutate, openModal, removeItem, isAdmin }) {
+function Announcements({ db, mutate, openModal, removeItem, isAdmin, me }) {
   const list = [...db.announcements].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const del = (a) => removeItem("announcements", a, { name: a.title, audit: `deleted announcement "${a.title}"` });
+  const ack = (a) => { haptic(10); mutate((d) => ({ ...d, announcements: d.announcements.map((x) => x.id === a.id ? { ...x, acks: Array.from(new Set([...(x.acks || []), me.id])) } : x) }), null); };
   return (
     <div className="content">
       <div className="page-head"><h3>Announcements</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "announcement" })}><Plus size={16} />New announcement</button>}</div>
@@ -3340,7 +3421,10 @@ function Announcements({ db, mutate, openModal, removeItem, isAdmin }) {
               <div style={{ flex: 1 }}>
                 <div style={{ fontWeight: 700, fontSize: 16 }}>{a.title}</div>
                 {a.body && <div style={{ marginTop: 6, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{a.body}</div>}
-                <div className="item-meta" style={{ marginTop: 8 }}><span>{a.by || "Admin"}</span><span>{fmtDateTime(a.createdAt)}</span></div>
+                <div className="item-meta" style={{ marginTop: 8 }}><span>{a.by || "Admin"}</span><span>{fmtDateTime(a.createdAt)}</span>{isAdmin && <span><BadgeCheck size={12} style={{ verticalAlign: -2 }} /> {(a.acks || []).length} acknowledged</span>}</div>
+                {!isAdmin && ((a.acks || []).includes(me.id)
+                  ? <div className="hint-line" style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 5, color: "var(--pos)" }}><BadgeCheck size={13} />You acknowledged this</div>
+                  : <div style={{ marginTop: 10 }}><button className="btn sm primary" onClick={() => ack(a)}><Check size={13} />Acknowledge</button></div>)}
               </div>
               {isAdmin && <div className="row-actions"><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "announcement", initial: a })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete announcement?", body: `Delete "${a.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(a) })}><Trash2 size={14} /></button></div>}
             </div>
@@ -3414,6 +3498,8 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
 
 function Chat({ db, mutate, me }) {
   const [text, setText] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [editText, setEditText] = useState("");
   const endRef = useRef(null);
   const list = [...db.chat].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
@@ -3422,6 +3508,8 @@ function Chat({ db, mutate, me }) {
     setText("");
     mutate((d) => ({ ...d, chat: [...d.chat, { id: uid(), userId: me.id, userName: me.name, text: t, createdAt: Date.now() }] }), null);
   };
+  const startEdit = (m) => { setEditId(m.id); setEditText(m.text); };
+  const saveEdit = (m) => { const t = editText.trim(); if (!t) { setEditId(null); return; } mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, text: t, editedAt: Date.now() } : x) }), null); setEditId(null); setEditText(""); };
   return (
     <div className="content" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 160px)" }}>
       <div className="page-head"><h3>Team chat</h3></div>
@@ -3433,8 +3521,15 @@ function Chat({ db, mutate, me }) {
               <div key={m.id} style={{ display: "flex", gap: 10, flexDirection: mine ? "row-reverse" : "row" }}>
                 <div className="avatar" style={{ background: avatarColor(m.userName), width: 30, height: 30, fontSize: 12, flex: "none" }}>{(m.userName || "?")[0]}</div>
                 <div style={{ maxWidth: "72%" }}>
-                  <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>
-                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}</div>
+                  {editId === m.id ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <textarea className="textarea" style={{ minHeight: 44 }} value={editText} onChange={(e) => setEditText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(m); } }} autoFocus />
+                      <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}><button className="btn sm" onClick={() => { setEditId(null); setEditText(""); }}>Cancel</button><button className="btn sm primary" onClick={() => saveEdit(m)}><Check size={13} />Save</button></div>
+                    </div>
+                  ) : (
+                    <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                  )}
+                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}</div>
                 </div>
               </div>
             );
@@ -3893,9 +3988,9 @@ export default function App() {
           ? <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} />
           : <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} showMoney={canFinance} showOps={isAdmin} />;
       case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} removeItem={removeItem} />;
-      case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} />;
+      case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} openModal={openModal} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
-      case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} />;
+      case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} removeItem={removeItem} openModal={openModal} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} />;
       case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} locks={locks} lockPeriod={lockPeriod} unlockPeriod={unlockPeriod} isSuper={isSuper} currentUser={currentUser} />;
       case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} isSuper={isSuper} currentUser={currentUser} />;
@@ -3903,14 +3998,14 @@ export default function App() {
       case "concepts": return <Concepts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
-      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} />;
+      case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} me={me} />;
       case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
       case "portal-posts": return <PortalPosts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "planned": return <Planned db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} openIncome={openIncome} canFinance={canFinance} />;
       case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
-      case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "chat": return <Chat db={db} mutate={mutate} me={me} />;
@@ -4008,6 +4103,7 @@ export default function App() {
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
+        {modal?.type === "okConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} word="OK" actionLabel={modal.actionLabel || "Confirm"} icon={modal.icon} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
 
         {balanceUser && <BalanceDetail db={db} user={balanceUser} onClose={() => setBalanceUser(null)} onFull={canFinance ? openAccount : undefined} />}
       </div>
