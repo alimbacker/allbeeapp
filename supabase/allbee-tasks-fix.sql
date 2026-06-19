@@ -57,3 +57,4 @@ select name, role, status, active
 from public.profiles
 where lower(name) in ('haji', 'alim')
 order by name;
+
