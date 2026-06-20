@@ -93,8 +93,26 @@ const STATUS_OPTIONS = ["active", "on_leave", "suspended", "resigned", "terminat
 const STATUS_ACTIVE = { active: true, on_leave: true, suspended: false, resigned: false, terminated: false };
 // business modules an admin can grant to an individual staff member, one by one
 const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"]];
-// who must accept the Terms & Conditions before they can use the app
-const TNC_ROLES = ["accountant", "staff", "intern"];
+// Who must accept Terms & Conditions before using the app. Partners (superadmin)
+// author the agreements, so they're exempt; everyone else signs.
+const TNC_ROLES = ["admin", "accountant", "staff", "intern"];
+// The two layers of T&C: ONE general agreement for everyone (tnc_body/tnc_version),
+// plus a per-role agreement (tnc_roles → { role: {body, version} }). A user must
+// accept both their general and their role-specific agreement to gain access.
+function roleTncOf(config) { try { return JSON.parse((config && config.tnc_roles) || "{}") || {}; } catch { return {}; } }
+function acceptedRoleTnc(profile) { const a = profile && profile.tnc_roles_accepted; return a && typeof a === "object" ? a : {}; }
+// Every agreement this user still needs to accept (general first, then role-specific).
+function pendingTnc(config, profile, role) {
+  if (!profile || !TNC_ROLES.includes(role)) return [];
+  const out = [];
+  const gv = Number(config?.tnc_version || 0);
+  if (gv > 0 && Number(profile.tnc_version || 0) < gv)
+    out.push({ key: "all", title: "Company terms — everyone", body: config?.tnc_body || "", version: gv });
+  const rc = roleTncOf(config)[role];
+  if (rc && Number(rc.version || 0) > 0 && Number(acceptedRoleTnc(profile)[role] || 0) < Number(rc.version))
+    out.push({ key: role, title: `${ROLE_LABEL[role] || role} terms`, body: rc.body || "", version: Number(rc.version) });
+  return out;
+}
 
 const isSuperRole = (r) => r === "superadmin";
 const isAdminRole = (r) => r === "superadmin" || r === "admin";        // management level
@@ -225,14 +243,14 @@ async function replaceAll(clean) {
 
 /* ── people (profiles / roles) ────────────────────────────────────────── */
 async function fetchTeam() {
-  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version,approved,designation,last_active,username").order("created_at", { ascending: true });
+  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version,tnc_roles_accepted,approved,designation,last_active,username").order("created_at", { ascending: true });
   if (error) throw new Error(`Loading team: ${error.message}`);
   return data || [];
 }
 // The live Terms & Conditions + version live in app_config; staff can read only
 // the tnc_* keys (the admin sign-up code is locked away by row-level security).
 async function fetchConfig() {
-  const { data, error } = await supabase.from("app_config").select("key,value").in("key", ["tnc_version", "tnc_body", "company"]);
+  const { data, error } = await supabase.from("app_config").select("key,value").in("key", ["tnc_version", "tnc_body", "tnc_roles", "company"]);
   if (error) return {}; // non-fatal — the T&C gate simply won't apply
   const out = {};
   for (const r of data || []) out[r.key] = r.value;
@@ -2225,7 +2243,7 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, config, saveTnc, saveCompany }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, config, saveTnc, saveRoleTnc, saveCompany }) {
   const fileRef = useRef(null);
   const [importOpen, setImportOpen] = useState(false);
   const exportJSON = () => {
@@ -2258,7 +2276,7 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
         </div>
       </div>
 
-      <TncManager config={config} saveTnc={saveTnc} />
+      <TncManager config={config} saveTnc={saveTnc} saveRoleTnc={saveRoleTnc} />
 
       <CompanySettings config={config} saveCompany={saveCompany} />
 
@@ -2293,29 +2311,40 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
   );
 }
 
-function TncManager({ config, saveTnc }) {
-  const version = Number(config?.tnc_version || 0);
-  const [body, setBody] = useState(config?.tnc_body || "");
+function TncManager({ config, saveTnc, saveRoleTnc }) {
+  const TARGETS = [["all", "All users (general)"], ["admin", "Admins"], ["accountant", "Accountants"], ["staff", "Staff"], ["intern", "Interns"]];
+  const [target, setTarget] = useState("all");
+  const roleMap = roleTncOf(config);
+  const bodyFor = (t) => t === "all" ? (config?.tnc_body || "") : (roleMap[t]?.body || "");
+  const versionFor = (t) => t === "all" ? Number(config?.tnc_version || 0) : Number(roleMap[t]?.version || 0);
+  const [body, setBody] = useState(bodyFor("all"));
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
-  useEffect(() => { setBody(config?.tnc_body || ""); }, [config?.tnc_body]);
+  // load the selected agreement's text when the target or stored config changes
+  useEffect(() => { setBody(target === "all" ? (config?.tnc_body || "") : (roleTncOf(config)[target]?.body || "")); setDone(false); }, [target, config?.tnc_body, config?.tnc_roles]);
+  const version = versionFor(target);
+  const targetLabel = (TARGETS.find((t) => t[0] === target) || ["", ""])[1];
   const publish = async () => {
     setSaving(true); setDone(false);
-    try { await saveTnc(body); setDone(true); } catch { /* surfaced via the sync banner */ } finally { setSaving(false); }
+    try { if (target === "all") await saveTnc(body); else await saveRoleTnc(target, body); setDone(true); }
+    catch { /* surfaced via the sync banner */ } finally { setSaving(false); }
   };
   return (
     <div className="card stat" style={{ marginBottom: 14 }}>
       <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Terms &amp; conditions</div>
-      <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
-        The agreement every accountant, staff member and intern accepts on first sign-in. {version > 0 ? <>Currently on <b>version {version}</b>. </> : <>Nothing published yet. </>}
-        Publishing a change asks everyone to read and accept it again before they can carry on.
+      <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 12 }}>
+        Publish a <b>general</b> agreement everyone signs, plus optional <b>role-specific</b> agreements. On sign-in each person accepts the general terms <i>and</i> the terms for their role. Publishing a change asks the affected people to re-accept before they carry on.
       </p>
-      <textarea className="textarea" style={{ minHeight: 150 }} value={body} onChange={(e) => { setBody(e.target.value); setDone(false); }} placeholder="Paste or write your terms & conditions here…" />
+      <div className="grid2" style={{ marginBottom: 10 }}>
+        <Field label="Agreement"><select className="select" value={target} onChange={(e) => setTarget(e.target.value)}>{TARGETS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></Field>
+        <div style={{ display: "flex", alignItems: "flex-end", paddingBottom: 8 }}><span className="hint-line">{version > 0 ? <>Current: <b style={{ color: "var(--ink)" }}>version {version}</b></> : "Not published yet"}</span></div>
+      </div>
+      <textarea className="textarea" style={{ minHeight: 150 }} value={body} onChange={(e) => { setBody(e.target.value); setDone(false); }} placeholder={target === "all" ? "Terms every employee accepts…" : `Terms specific to ${targetLabel}…`} />
       <div style={{ display: "flex", gap: 12, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
         <button className="btn primary" onClick={publish} disabled={saving || !body.trim()}>
           {saving ? <RefreshCw size={16} className="spin" /> : <ScrollText size={16} />}{version > 0 ? "Publish update" : "Publish terms"}
         </button>
-        {done && <span className="hint-line" style={{ color: "var(--pos)", display: "flex", alignItems: "center", gap: 6 }}><Check size={14} /> Published — the team will be asked to re-accept.</span>}
+        {done && <span className="hint-line" style={{ color: "var(--pos)", display: "flex", alignItems: "center", gap: 6 }}><Check size={14} /> Published — affected people re-accept on next sign-in.</span>}
       </div>
     </div>
   );
@@ -2919,31 +2948,39 @@ function MyProfile({ profile, role, saveMyProfile, sessionEmail }) {
 
 
 // published version. Editing the terms bumps the version and re-prompts everyone.
-function TermsGate({ body, version, onAccept, onSignOut, isDark }) {
-  const [checked, setChecked] = useState(false);
+function TermsGate({ agreements = [], onAccept, onSignOut, isDark }) {
+  const list = agreements.length ? agreements : [{ key: "all", title: "Terms & conditions", body: "", version: 0 }];
+  const [checks, setChecks] = useState(() => ({}));
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const ready = checked && typed.trim().toUpperCase() === "AGREE";
+  const allChecked = list.every((a) => checks[a.key]);
+  const ready = allChecked && typed.trim().toUpperCase() === "AGREE";
   const accept = async () => {
     if (!ready) return;
     setBusy(true); setErr("");
-    try { await onAccept(version); }
+    try { await onAccept(list); }
     catch (e) { setErr(e.message || "Couldn't record that. Try again."); setBusy(false); }
   };
+  const multi = list.length > 1;
   return (
     <div className="allbee lock" data-theme={isDark ? "dark" : "light"}>
       <style>{CSS}</style>
       <div className="lock-card gate-card">
         <img className="lock-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 52 }} />
         <h1>Terms &amp; conditions</h1>
-        <p>Please read and accept to continue.</p>
-        <div className="tnc-scroll">{body && body.trim() ? body : "Your administrator hasn't added the agreement text yet."}</div>
-        <label className="checkrow">
-          <input type="checkbox" checked={checked} onChange={(e) => setChecked(e.target.checked)} />
-          I have read and understood the terms above.
-        </label>
-        <div style={{ marginTop: 12 }}>
+        <p>{multi ? "Please read and accept both agreements to continue." : "Please read and accept to continue."}</p>
+        {list.map((a) => (
+          <div key={a.key} style={{ marginBottom: 14 }}>
+            {multi && <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)", marginBottom: 6 }}>{a.title}{a.version ? ` · v${a.version}` : ""}</div>}
+            <div className="tnc-scroll">{a.body && a.body.trim() ? a.body : "Your administrator hasn't added the agreement text yet."}</div>
+            <label className="checkrow">
+              <input type="checkbox" checked={!!checks[a.key]} onChange={(e) => setChecks((c) => ({ ...c, [a.key]: e.target.checked }))} />
+              I have read and understood {multi ? "these terms" : "the terms above"}.
+            </label>
+          </div>
+        ))}
+        <div style={{ marginTop: 4 }}>
           <Field label="Type AGREE to confirm"><input className="input" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="AGREE" autoCapitalize="characters" /></Field>
         </div>
         {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
@@ -2960,32 +2997,42 @@ function TermsGate({ body, version, onAccept, onSignOut, isDark }) {
    acceptance; this lets anyone re-read the agreement they're bound by, any time,
    and shows which version they accepted. Read-only — admins edit it in Settings. */
 function TermsPage({ config, profile, role, isAdmin, go }) {
-  const version = Number(config?.tnc_version || 0);
-  const body = config?.tnc_body || "";
-  const myVersion = Number(profile?.tnc_version || 0);
-  const mustAccept = TNC_ROLES.includes(role);          // staff / accountant / intern
-  const accepted = version > 0 && myVersion >= version;
+  const mustAccept = TNC_ROLES.includes(role);                 // admin/accountant/staff/intern
+  const gv = Number(config?.tnc_version || 0);
+  const myGv = Number(profile?.tnc_version || 0);
+  const rc = roleTncOf(config)[role];
+  const myRoleV = Number(acceptedRoleTnc(profile)[role] || 0);
+  const cards = [];
+  if (gv > 0) cards.push({ id: "all", title: "Company terms — everyone", version: gv, body: config?.tnc_body || "", accepted: mustAccept ? myGv >= gv : null });
+  if (rc && Number(rc.version || 0) > 0) cards.push({ id: "role", title: `${ROLE_LABEL[role] || role} terms`, version: Number(rc.version), body: rc.body || "", accepted: mustAccept ? myRoleV >= Number(rc.version) : null });
+  const statusBadge = (c) => c.accepted === null
+    ? <span className="badge">Published v{c.version}</span>
+    : c.accepted
+      ? <span className="badge pos" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><BadgeCheck size={12} />Accepted · v{c.version}</span>
+      : <span className="badge neg" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><AlertTriangle size={12} />Re-accept on next sign-in · v{c.version}</span>;
   return (
     <div className="content">
       <div className="page-head"><h3>Terms &amp; conditions</h3><span className="spacer" />
         {isAdmin && <button className="btn" onClick={() => go("settings")}><Pencil size={15} />Edit in Settings</button>}</div>
 
-      {version === 0 || !body.trim() ? (
+      {cards.length === 0 ? (
         <div className="card"><Empty icon={<ScrollText size={22} color="var(--muted)" />} title="No terms published yet"
-          text={isAdmin ? "Publish the company agreement from Settings — staff will be asked to accept it on their next sign-in." : "Your administrator hasn't published the agreement yet. You'll be asked to accept it once it's available."}
+          text={isAdmin ? "Publish a general agreement (and optional role-specific ones) from Settings — people are asked to accept on their next sign-in." : "Your administrator hasn't published the agreement yet. You'll be asked to accept it once it's available."}
           action={isAdmin && <button className="btn primary" onClick={() => go("settings")}><Pencil size={16} />Add terms in Settings</button>} /></div>
       ) : (
         <>
-          {mustAccept ? (
-            accepted
-              ? <div className="banner" style={{ marginLeft: 0, marginRight: 0, borderColor: "var(--pos)" }}><BadgeCheck size={15} color="var(--pos)" /> You accepted these terms — version {version} is the current published version.</div>
-              : <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><AlertTriangle size={15} /> A newer version (v{version}) is published. You'll be asked to accept it on your next sign-in.</div>
-          ) : (
-            <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><ScrollText size={15} /> Current published version: {version}. Partners and admins aren't required to accept; staff, accountants and interns accept on sign-in.</div>
-          )}
-          <div className="card stat" style={{ marginTop: 14 }}>
-            <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}><FileText size={14} /> Agreement (version {version})</div>
-            <div className="tnc-scroll" style={{ maxHeight: 520 }}>{body}</div>
+          {!mustAccept && <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><ScrollText size={15} /> Partners aren't required to accept. Staff, accountants, interns and admins accept their general and role terms on sign-in.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: mustAccept ? 0 : 14 }}>
+            {cards.map((c) => (
+              <div key={c.id} className="card stat">
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                  <span className="lbl" style={{ fontWeight: 700, color: "var(--ink)" }}><FileText size={14} /> {c.title}</span>
+                  <span className="spacer" style={{ flex: 1 }} />
+                  {statusBadge(c)}
+                </div>
+                <div className="tnc-scroll" style={{ maxHeight: 460 }}>{c.body}</div>
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -4452,7 +4499,20 @@ export default function App() {
   // ── auth session ──────────────────────────────────────────────────────
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => {
+      // Supabase auto-refreshes the JWT whenever the tab/app regains focus and
+      // fires TOKEN_REFRESHED with a brand-new session object. That object change
+      // used to re-run the data-load effect, flip `loading`, and remount the whole
+      // page — wiping anything you were typing. Only update when the actual signed-in
+      // user changes (sign in / sign out / switch account); ignore pure token
+      // refreshes by returning the previous reference so React skips the update.
+      setSession((prev) => {
+        const prevId = prev && prev.user ? prev.user.id : null;
+        const nextId = s && s.user ? s.user.id : null;
+        if (prevId === nextId) return prev;   // same user → no churn, no reload
+        return s ?? null;
+      });
+    });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -4584,11 +4644,28 @@ export default function App() {
 
   // first-login profile completion + T&C acceptance (both write to my own row)
   const saveMyProfile = useCallback((patch) => changeProfile(me.id, patch), [changeProfile, me.id]);
-  const acceptTnc = useCallback((v) => changeProfile(me.id, { tnc_version: v }), [changeProfile, me.id]);
+  const acceptTnc = useCallback((agreements) => {
+    const patch = {};
+    let roleAccepts = null;
+    for (const a of (agreements || [])) {
+      if (a.key === "all") patch.tnc_version = a.version;
+      else { roleAccepts = roleAccepts || { ...acceptedRoleTnc(profile) }; roleAccepts[a.key] = a.version; }
+    }
+    if (roleAccepts) patch.tnc_roles_accepted = roleAccepts;
+    return changeProfile(me.id, patch);
+  }, [changeProfile, me.id, profile]);
   // publish/edit the Terms (admins): bump the version so everyone re-accepts
   const saveTnc = useCallback(async (body) => {
     const next = Number(config?.tnc_version || 0) + 1;
     await saveConfig({ tnc_body: body, tnc_version: next });
+    if (session) setConfig(await fetchConfig());
+  }, [config, session]);
+  // publish/edit a ROLE-SPECIFIC agreement; bumps just that role's version
+  const saveRoleTnc = useCallback(async (roleKey, body) => {
+    const map = roleTncOf(config);
+    const cur = map[roleKey] || {};
+    map[roleKey] = { body, version: Number(cur.version || 0) + 1 };
+    await saveConfig({ tnc_roles: JSON.stringify(map) });
     if (session) setConfig(await fetchConfig());
   }, [config, session]);
   const saveCompany = useCallback(async (obj) => {
@@ -4718,12 +4795,11 @@ export default function App() {
   // first login: require the core profile details before anything else
   if (profile && (!profile.mobile || !profile.dob))
     return <ProfileSetup profile={profile} onSave={saveMyProfile} onSignOut={signOut} isDark={isDark} />;
-  // then the Terms gate for accountants / staff / interns until they accept the
-  // current published version
-  const tncVersion = Number(config?.tnc_version || 0);
-  const mustAcceptTnc = tncVersion > 0 && TNC_ROLES.includes(role) && Number(profile?.tnc_version || 0) < tncVersion;
-  if (profile && mustAcceptTnc)
-    return <TermsGate body={config?.tnc_body || ""} version={tncVersion} onAccept={acceptTnc} onSignOut={signOut} isDark={isDark} />;
+  // then the Terms gate — show every agreement (general + role-specific) this
+  // user still needs to accept; they accept all before gaining access
+  const tncPending = pendingTnc(config, profile, role);
+  if (profile && tncPending.length)
+    return <TermsGate agreements={tncPending} onAccept={acceptTnc} onSignOut={signOut} isDark={isDark} />;
   if (loading || !db) return <Loading />;
 
   const teamNames = team.length ? team.map((p) => p.name) : USERS;
@@ -4781,7 +4857,7 @@ export default function App() {
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} saveCompany={saveCompany} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} saveRoleTnc={saveRoleTnc} saveCompany={saveCompany} />;
       default: return null;
     }
   };
