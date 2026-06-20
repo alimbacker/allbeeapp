@@ -52,6 +52,10 @@ begin
   if hi >= 0 then perform setval('public.task_number_seq', greatest(hi, 1), hi > 0); end if;
 end $$;
 
+-- The original app already defines next_task_number() with a different return
+-- type, and CREATE OR REPLACE cannot change a function's return type — so drop
+-- it first. (Only the client calls it via RPC, so there are no DB dependents.)
+drop function if exists public.next_task_number();
 create or replace function public.next_task_number()
 returns bigint language sql volatile security definer set search_path = public as $$
   select nextval('public.task_number_seq')
@@ -133,8 +137,7 @@ create trigger trg_lock_wd before insert or update or delete on public.withdrawa
   for each row execute function public.guard_fin_lock();
 
 -- ── 6. Recently-deleted: 60-day auto-purge (pg_cron) ─────────────────────
-create extension if not exists pg_cron;
-
+-- The purge function works on its own; pg_cron just runs it on a schedule.
 create or replace function public.purge_recycle()
 returns void language sql security definer set search_path = public as $$
   delete from public.recycle
@@ -142,10 +145,17 @@ returns void language sql security definer set search_path = public as $$
          < (extract(epoch from now()) * 1000)::bigint - (60::bigint * 86400000);
 $$;
 
--- schedule once a day at 03:15 UTC (re-running this migration re-registers it)
-select cron.unschedule('allbee_purge_recycle')
-  where exists (select 1 from cron.job where jobname = 'allbee_purge_recycle');
-select cron.schedule('allbee_purge_recycle', '15 3 * * *', $$ select public.purge_recycle(); $$);
+-- Schedule it daily at 03:15 UTC. If pg_cron isn't enabled on this project, skip
+-- with a notice instead of failing the whole migration. (The app shows the
+-- countdown regardless; you can run  select public.purge_recycle();  any time.)
+do $$
+begin
+  create extension if not exists pg_cron;
+  begin perform cron.unschedule('allbee_purge_recycle'); exception when others then null; end;
+  perform cron.schedule('allbee_purge_recycle', '15 3 * * *', 'select public.purge_recycle();');
+exception when others then
+  raise notice 'pg_cron unavailable (%); 60-day auto-purge not scheduled. Enable pg_cron under Database > Extensions if you want it.', sqlerrm;
+end $$;
 
 -- ── 7. Storage bucket for uploads (chat attachments + documents) ─────────
 insert into storage.buckets (id, name, public)
