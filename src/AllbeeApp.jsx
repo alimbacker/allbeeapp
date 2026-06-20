@@ -1107,7 +1107,46 @@ function ConceptForm({ initial, onSave, onClose }) {
 /* ══════════════════════════════════════════════════════════════════════
    PAGES
 ══════════════════════════════════════════════════════════════════════ */
-function Dashboard({ db, bal, go, openBalance, showMoney = true, showOps = true }) {
+// Days until a person's next birthday (DOB captured at first login). Returns
+// 0 on the day itself, null if no/invalid DOB.
+function daysUntilBirthday(dobISO, ref = new Date()) {
+  if (!dobISO) return null;
+  const d = new Date(dobISO + (dobISO.length === 10 ? "T00:00:00" : ""));
+  if (isNaN(d)) return null;
+  const today = new Date(ref); today.setHours(0, 0, 0, 0);
+  let next = new Date(today.getFullYear(), d.getMonth(), d.getDate());
+  if (next < today) next = new Date(today.getFullYear() + 1, d.getMonth(), d.getDate());
+  return Math.round((next - today) / 86400000);
+}
+// Upcoming employee birthdays (clients excluded). Shows nothing when none fall
+// inside the window, so it stays out of the way most of the year.
+function Birthdays({ team, windowDays = 30 }) {
+  const upcoming = (team || [])
+    .filter((p) => p.role !== "client" && p.active !== false && p.dob)
+    .map((p) => ({ p, days: daysUntilBirthday(p.dob) }))
+    .filter((x) => x.days != null && x.days <= windowDays)
+    .sort((a, b) => a.days - b.days);
+  if (upcoming.length === 0) return null;
+  const rel = (n) => (n === 0 ? "Today 🎂" : n === 1 ? "Tomorrow" : `in ${n} days`);
+  const dayMonth = (dobISO) => { const d = new Date(dobISO + "T00:00:00"); return new Date(new Date().getFullYear(), d.getMonth(), d.getDate()).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }); };
+  return (
+    <div className="card stat" style={{ marginBottom: 14 }}>
+      <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)" }}><CalendarDays size={14} /> Upcoming birthdays</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+        {upcoming.slice(0, 6).map(({ p, days }) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span className="avatar" style={{ background: avatarColor(p.name), width: 28, height: 28, fontSize: 11 }}>{p.name[0]}</span>
+            <span style={{ flex: 1, fontWeight: 600 }}>{p.name}{days === 0 ? " — wish them well!" : ""}</span>
+            <span className="hint-line mono" style={{ fontSize: 12 }}>{dayMonth(p.dob)}</span>
+            <span className={"badge " + (days === 0 ? "pos" : days <= 7 ? "accent" : "")}>{rel(days)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ db, bal, go, openBalance, showMoney = true, showOps = true, team = [] }) {
   const m = monthStats(db);
   const pending = db.tasks.filter((t) => t.status !== "Completed").length;
   const active = db.projects.filter((p) => p.stage !== "Completed").length;
@@ -1124,6 +1163,8 @@ function Dashboard({ db, bal, go, openBalance, showMoney = true, showOps = true 
   return (
     <div className="content">
       <div className="page-head"><h3>Dashboard</h3></div>
+
+      <Birthdays team={team} />
 
       {showMoney && (
         <div className="card stat" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
@@ -2283,7 +2324,7 @@ function TncManager({ config, saveTnc }) {
 /* ══════════════════════════════════════════════════════════════════════
    STAFF + HR MODULES
 ══════════════════════════════════════════════════════════════════════ */
-function StaffDashboard({ db, me, go, mutate, openModal }) {
+function StaffDashboard({ db, me, go, mutate, openModal, team = [] }) {
   const today = todayISO();
   const todays = db.attendance.filter((a) => a.userId === me.id && a.date === today);
   const openSess = todays.find((a) => !a.checkOut);
@@ -2315,6 +2356,8 @@ function StaffDashboard({ db, me, go, mutate, openModal }) {
         {!leaveToday && !openSess && <button className="btn primary" onClick={checkIn}><LogIn size={16} />Check in</button>}
         {!leaveToday && openSess && <button className="btn primary" onClick={checkOut}><CheckCircle2 size={16} />Check out</button>}
       </div>
+
+      <Birthdays team={team} />
 
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", marginBottom: 16 }}>
         <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("tasks")}>
@@ -2844,6 +2887,44 @@ function TermsGate({ body, version, onAccept, onSignOut, isDark }) {
   );
 }
 
+/* Always-available Terms & Conditions page. The first-login TermsGate forces
+   acceptance; this lets anyone re-read the agreement they're bound by, any time,
+   and shows which version they accepted. Read-only — admins edit it in Settings. */
+function TermsPage({ config, profile, role, isAdmin, go }) {
+  const version = Number(config?.tnc_version || 0);
+  const body = config?.tnc_body || "";
+  const myVersion = Number(profile?.tnc_version || 0);
+  const mustAccept = TNC_ROLES.includes(role);          // staff / accountant / intern
+  const accepted = version > 0 && myVersion >= version;
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Terms &amp; conditions</h3><span className="spacer" />
+        {isAdmin && <button className="btn" onClick={() => go("settings")}><Pencil size={15} />Edit in Settings</button>}</div>
+
+      {version === 0 || !body.trim() ? (
+        <div className="card"><Empty icon={<ScrollText size={22} color="var(--muted)" />} title="No terms published yet"
+          text={isAdmin ? "Publish the company agreement from Settings — staff will be asked to accept it on their next sign-in." : "Your administrator hasn't published the agreement yet. You'll be asked to accept it once it's available."}
+          action={isAdmin && <button className="btn primary" onClick={() => go("settings")}><Pencil size={16} />Add terms in Settings</button>} /></div>
+      ) : (
+        <>
+          {mustAccept ? (
+            accepted
+              ? <div className="banner" style={{ marginLeft: 0, marginRight: 0, borderColor: "var(--pos)" }}><BadgeCheck size={15} color="var(--pos)" /> You accepted these terms — version {version} is the current published version.</div>
+              : <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><AlertTriangle size={15} /> A newer version (v{version}) is published. You'll be asked to accept it on your next sign-in.</div>
+          ) : (
+            <div className="banner" style={{ marginLeft: 0, marginRight: 0 }}><ScrollText size={15} /> Current published version: {version}. Partners and admins aren't required to accept; staff, accountants and interns accept on sign-in.</div>
+          )}
+          <div className="card stat" style={{ marginTop: 14 }}>
+            <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)", marginBottom: 8 }}><FileText size={14} /> Agreement (version {version})</div>
+            <div className="tnc-scroll" style={{ maxHeight: 520 }}>{body}</div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+
 /* ══════════════════════════════════════════════════════════════════════
    APP SHELL + ERROR BOUNDARY
 ══════════════════════════════════════════════════════════════════════ */
@@ -2886,6 +2967,7 @@ const NAV = [
   ["announcements", "Announcements", MegaphoneIcon, "collab"],
   ["documents", "Documents", Paperclip, "collab"],
   ["knowledge", "Knowledge base", BookOpen, "collab"],
+  ["terms", "Terms & conditions", BadgeCheck, "everyone"],
   ["performance", "Performance", TrendingUp, "insight"],
   ["rewards", "Rewards", Award, "collab"],
   ["team", "Team", Users, "admin"],
@@ -3706,11 +3788,20 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
   const all = [...db.knowledge].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const list = cat === "All" ? all : all.filter((k) => k.category === cat);
   const del = (k) => removeItem("knowledge", k, { name: k.title, audit: `deleted article "${k.title}"` });
+  // PRD: knowledge can be shared through Notifications / Tasks. Each opens the
+  // matching composer pre-filled, so the admin still picks audience / assignee.
+  const shareKb = (k, how) => {
+    const excerpt = (k.body || "").slice(0, 600);
+    if (how === "notify") openModal({ type: "notification", initial: { title: "📚 " + k.title, body: excerpt + ((k.body || "").length > 600 ? "…" : ""), level: "General", audience: "all" } });
+    else openModal({ type: "task", initial: { title: "Read: " + k.title, desc: k.body || "" } });
+  };
   const article = open ? db.knowledge.find((k) => k.id === open) : null;
   if (article) return (
     <div className="content">
       <button className="backlink" onClick={() => setOpen(null)}><ArrowLeft size={15} />Back to knowledge base</button>
-      <div className="detail-head"><div><h3>{article.title}</h3><div className="item-meta" style={{ marginTop: 6 }}><span className="tag">{article.category}</span><span>{fmtDate(new Date(article.createdAt).toISOString().slice(0, 10))}</span></div></div></div>
+      <div className="detail-head"><div><h3>{article.title}</h3><div className="item-meta" style={{ marginTop: 6 }}><span className="tag">{article.category}</span><span>{fmtDate(new Date(article.createdAt).toISOString().slice(0, 10))}</span></div></div>
+        {isAdmin && <div className="row-actions"><button className="btn sm" onClick={() => shareKb(article, "notify")}><Bell size={13} />Share as notification</button><button className="btn sm" onClick={() => shareKb(article, "task")}><ListTodo size={13} />Make a task</button></div>}
+      </div>
       <div className="card stat" style={{ lineHeight: 1.65, whiteSpace: "pre-wrap", fontSize: 14.5 }}>{article.body || "No content yet."}</div>
     </div>
   );
@@ -3725,7 +3816,7 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}><BookOpen size={16} color="var(--primary)" /><span className="tag">{k.category}</span></div>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{k.title}</div>
               <div className="sub" style={{ lineHeight: 1.5 }}>{(k.body || "").slice(0, 110)}{(k.body || "").length > 110 ? "…" : ""}</div>
-              {isAdmin && <div style={{ display: "flex", gap: 6, marginTop: 2 }} onClick={(e) => e.stopPropagation()}><button className="btn sm" onClick={() => openModal({ type: "knowledge", initial: k })}><Pencil size={13} /></button><button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete article?", body: `Delete "${k.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(k) })}><Trash2 size={13} /></button></div>}
+              {isAdmin && <div style={{ display: "flex", gap: 6, marginTop: 2 }} onClick={(e) => e.stopPropagation()}><button className="btn sm" title="Share with the team as a notification" onClick={() => shareKb(k, "notify")}><Bell size={13} />Share</button><button className="btn sm" onClick={() => openModal({ type: "knowledge", initial: k })}><Pencil size={13} /></button><button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete article?", body: `Delete "${k.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(k) })}><Trash2 size={13} /></button></div>}
             </div>
           ))}
       </div>
@@ -3849,10 +3940,43 @@ function Rewards({ db, mutate, openModal, removeItem, me, isAdmin, team }) {
   const list = isAdmin ? all : all.filter((r) => r.userId === me.id);
   const del = (r) => removeItem("rewards", r, { name: r.userName, audit: `removed recognition for ${r.userName}` });
   const myPoints = db.rewards.filter((r) => r.userId === me.id).reduce((s, r) => s + (Number(r.points) || 0), 0);
+
+  // Suggested recognition this month — computed from real activity so admins can
+  // award the obvious wins in one tap (PRD: top lead generator / best attendance /
+  // project closer). Each leader, only when there's a clear non-zero standout.
+  const month = new Date();
+  const staff = (team || []).filter((p) => ["staff", "intern", "admin", "accountant"].includes(p.role) && p.active !== false);
+  const lead = (metric) => { let best = null; for (const p of staff) { const v = metric(p); if (v > 0 && (!best || v > best.v)) best = { p, v }; } return best; };
+  const leadGen = lead((p) => db.leads.filter((l) => (l.ownerId === p.id || l.leadOwner === p.name) && l.stage === "Converted" && sameMonth(new Date(l.createdAt || 0).toISOString().slice(0, 10), month)).length);
+  const attend = lead((p) => round2(sumHours(db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month)))));
+  const closer = lead((p) => db.projects.filter((pr) => pr.stage === "Completed" && (pr.ownerName === p.name || pr.createdById === p.id)).length);
+  const nominees = [
+    leadGen && { p: leadGen.p, kind: "Goal smashed", points: 20, note: `Top lead generator — ${leadGen.v} converted this month`, badge: "Top lead generator", icon: <UserPlus size={13} /> },
+    attend && { p: attend.p, kind: "On-time hero", points: 15, note: `Best attendance — ${attend.v}h this month`, badge: "Best attendance", icon: <Clock size={13} /> },
+    closer && { p: closer.p, kind: "Star performer", points: 20, note: `Project closer — ${closer.v} completed`, badge: "Project closer", icon: <FolderKanban size={13} /> },
+  ].filter(Boolean);
+  const recognize = (n) => openModal({ type: "reward", initial: { userId: n.p.id, kind: n.kind, points: n.points, note: n.note, date: todayISO() } });
+
   return (
     <div className="content">
       <div className="page-head"><h3>Recognition & rewards</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "reward" })}><Award size={16} />Give recognition</button>}</div>
       {!isAdmin && <div className="sumrow"><div className="card"><div className="k"><Star size={14} /> Your points</div><div className="v mono">{myPoints}</div></div></div>}
+      {isAdmin && nominees.length > 0 && (
+        <div className="card stat" style={{ marginBottom: 14 }}>
+          <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)" }}><Award size={14} /> Suggested recognition this month</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+            {nominees.map((n) => (
+              <div key={n.badge} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span className="avatar" style={{ background: avatarColor(n.p.name), width: 28, height: 28, fontSize: 11 }}>{n.p.name[0]}</span>
+                <span style={{ fontWeight: 600 }}>{n.p.name}</span>
+                <span className="badge accent" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>{n.icon}{n.badge}</span>
+                <span className="hint-line" style={{ flex: 1, minWidth: 120, fontSize: 12 }}>{n.note}</span>
+                <button className="btn sm primary" onClick={() => recognize(n)}><Award size={13} />Recognize</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="card">
         {list.length === 0 ? <Empty icon={<Award size={22} color="var(--muted)" />} title={isAdmin ? "No recognition given yet" : "No recognition yet"} text={isAdmin ? "Celebrate good work — points feed the performance leaderboard." : "When an admin recognises your work, it shows up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "reward" })}><Award size={16} />Give recognition</button>} />
           : list.map((r) => (
@@ -4555,8 +4679,8 @@ export default function App() {
     switch (safeRoute) {
       case "dashboard":
         return (role === "staff" || role === "intern")
-          ? <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} />
-          : <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} showMoney={canFinance} showOps={isAdmin} />;
+          ? <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} team={team} />
+          : <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} showMoney={canFinance} showOps={isAdmin} team={team} />;
       case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} removeItem={removeItem} />;
       case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} openModal={openModal} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
@@ -4580,6 +4704,7 @@ export default function App() {
       case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "terms": return <TermsPage config={config} profile={profile} role={role} isAdmin={isAdmin} go={go} />;
       case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
