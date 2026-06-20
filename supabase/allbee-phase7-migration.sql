@@ -76,12 +76,17 @@ create table if not exists public.invoices (
 alter table public.notifications enable row level security;
 alter table public.invoices       enable row level security;
 
--- notifications: any signed-in member can read (the app filters by audience);
--- only admins can create / change / delete.
+-- notifications: any internal member can read + mark-as-read (the app filters
+-- by audience); only admins can create or delete.
 drop policy if exists notif_select on public.notifications;
 drop policy if exists notif_write  on public.notifications;
+drop policy if exists notif_insert on public.notifications;
+drop policy if exists notif_update on public.notifications;
+drop policy if exists notif_delete on public.notifications;
 create policy notif_select on public.notifications for select to authenticated using (public.is_internal());
-create policy notif_write  on public.notifications for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy notif_insert on public.notifications for insert to authenticated with check (public.is_admin());
+create policy notif_update on public.notifications for update to authenticated using (public.is_internal()) with check (public.is_internal());
+create policy notif_delete on public.notifications for delete to authenticated using (public.is_admin());
 
 -- invoices: internal staff manage them; a portal CLIENT may read only the
 -- invoices shared to them (data.clientId = their auth id).
@@ -91,6 +96,10 @@ create policy inv_select on public.invoices for select to authenticated
   using (public.is_internal() or (data->>'clientId') = auth.uid()::text);
 create policy inv_write on public.invoices for all to authenticated
   using (public.is_internal()) with check (public.is_internal());
+
+-- table privileges (RLS above governs which rows each person can touch)
+grant select, insert, update, delete on public.notifications to authenticated;
+grant select, insert, update, delete on public.invoices       to authenticated;
 
 -- ── 4. Permanent, tamper-proof audit trail ───────────────────────────────
 --  Every authenticated user may INSERT (staff actions are now logged too).
@@ -107,6 +116,7 @@ end $$;
 create policy audit_insert on public.audit for insert to authenticated with check (true);
 create policy audit_select on public.audit for select to authenticated using (public.is_admin());
 -- (intentionally NO update/delete policies → audit is append-only)
+grant  select, insert on public.audit to authenticated;   -- privilege layer (policies alone aren't enough)
 revoke update, delete on public.audit from authenticated, anon;
 
 -- ── 5. Financial month-lock enforcement (DB-level) ───────────────────────
