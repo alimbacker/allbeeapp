@@ -26,10 +26,10 @@ const PROJECT_STAGES = ["Lead", "Discussion", "Proposal Sent", "Advance Received
 const PRIORITIES = ["Low", "Medium", "High", "Urgent"];
 const INCOME_CATEGORIES = ["Project", "Course", "Marketing", "Consulting", "Other"];
 const EXPENSE_CATEGORIES = ["Office Rent", "Internet", "Electricity", "Marketing", "Software", "Travel", "Other"];
-const LEAVE_TYPES = ["Casual", "Sick", "Earned", "Unpaid"];
+const LEAVE_TYPES = ["Casual", "Sick", "Emergency", "Earned", "Unpaid", "Other"];
 
 // Phase 3–6 domain vocab
-const LEAD_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"];
+const LEAD_STAGES = ["New", "Contacted", "Qualified", "Proposal Sent", "Converted", "Lost"];
 const LEAD_SOURCES = ["Referral", "Instagram", "Facebook", "Website", "Walk-in", "Cold call", "Other"];
 const QUOTE_STATUS = ["Draft", "Sent", "Accepted", "Rejected"];
 const DOC_CATEGORIES = ["Contract", "Invoice", "Design", "Brand", "Report", "Other"];
@@ -37,6 +37,35 @@ const KB_CATEGORIES = ["Policy", "How-to", "FAQ", "Onboarding", "Tools", "Other"
 const EXPENSE_RECURRENCE = ["One-time", "Monthly", "Quarterly", "Yearly"];
 const REWARD_KINDS = ["Star performer", "On-time hero", "Team player", "Goal smashed", "Bonus"];
 const VAULT_CATEGORIES = ["Social", "Website", "Hosting", "Email", "Domain", "Banking", "Tools", "Other"];
+
+// ── Phase 7 additions: statuses, levels, notifications, file uploads ───────
+const CLIENT_STATUS = ["Prospect", "Active", "Inactive", "Blacklisted"];
+const PLANNED_STATUS = ["Planned", "Approved", "Purchased", "Cancelled"];
+const NOTIF_LEVELS = ["General", "Important", "Urgent"];
+const NOTIF_AUDIENCES = [["all", "Everyone"], ["staff", "Staff only"], ["intern", "Interns only"], ["accountant", "Accountants only"], ["admin", "Admins only"]];
+const INVOICE_STATUS = ["Draft", "Sent", "Paid", "Overdue", "Cancelled"];
+const LEAD_SERVICES = ["Website", "App", "Digital marketing", "Course", "Branding", "Other"];
+const ONLINE_MS = 2 * 60 * 1000; // a member is "online" if active within 2 minutes
+const isOnline = (p) => !!(p && p.last_active) && (Date.now() - new Date(p.last_active).getTime()) < ONLINE_MS;
+function notifVisibleTo(n, profile) {
+  const aud = (n && n.audience) || "all";
+  if (aud === "all") return true;
+  if (aud.startsWith("user:")) return aud.slice(5) === (profile && profile.id);
+  return aud === (profile && profile.role);
+}
+const FILE_LIMITS = { image: 10, pdf: 50, doc: 25 };
+const fileKind = (file) => { const t = ((file && file.type) || "").toLowerCase(); if (t.startsWith("image/")) return "image"; if (t === "application/pdf") return "pdf"; return "doc"; };
+const fileLimitOK = (file) => ((file && file.size) || 0) <= FILE_LIMITS[fileKind(file)] * 1024 * 1024;
+async function uploadAttachment(file) {
+  const k = fileKind(file);
+  if (!fileLimitOK(file)) throw new Error(`File too large \u2014 ${k === "image" ? "images" : k === "pdf" ? "PDFs" : "documents"} are limited to ${FILE_LIMITS[k]} MB.`);
+  const ext = (file.name.split(".").pop() || "bin").toLowerCase();
+  const path = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const { error } = await supabase.storage.from("attachments").upload(path, file, { upsert: false, contentType: file.type || undefined });
+  if (error) throw new Error(error.message);
+  const { data } = supabase.storage.from("attachments").getPublicUrl(path);
+  return { url: data.publicUrl, name: file.name, size: file.size, type: file.type };
+}
 
 // Recently Deleted (recycle bin): which collections support soft-delete + restore,
 // the human label shown for each, and how long items survive before auto-cleanup.
@@ -47,6 +76,7 @@ const MODULE_LABEL = {
   leads: "Leads", clients: "Clients", quotations: "Quotations", planned: "Planned expenses",
   announcements: "Announcements", documents: "Documents", knowledge: "Knowledge base",
   rewards: "Rewards", vault: "Passwords", portal_posts: "Client updates",
+  notifications: "Notifications", invoices: "Invoices",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -138,7 +168,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -194,14 +224,14 @@ async function replaceAll(clean) {
 
 /* ── people (profiles / roles) ────────────────────────────────────────── */
 async function fetchTeam() {
-  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version,approved").order("created_at", { ascending: true });
+  const { data, error } = await supabase.from("profiles").select("id,name,email,role,active,created_at,status,mobile,dob,photo_url,perms,tnc_version,approved,designation,last_active,username").order("created_at", { ascending: true });
   if (error) throw new Error(`Loading team: ${error.message}`);
   return data || [];
 }
 // The live Terms & Conditions + version live in app_config; staff can read only
 // the tnc_* keys (the admin sign-up code is locked away by row-level security).
 async function fetchConfig() {
-  const { data, error } = await supabase.from("app_config").select("key,value").in("key", ["tnc_version", "tnc_body"]);
+  const { data, error } = await supabase.from("app_config").select("key,value").in("key", ["tnc_version", "tnc_body", "company"]);
   if (error) return {}; // non-fatal — the T&C gate simply won't apply
   const out = {};
   for (const r of data || []) out[r.key] = r.value;
@@ -274,6 +304,7 @@ const emptyDB = () => ({
   leads: [], clients: [], quotations: [], planned: [],
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
+  notifications: [], invoices: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -1675,7 +1706,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
     return r;
   }, [db.tasks, filter, scope, isAdmin, currentUser]);
 
-  const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
+  const auditFor = (action) => ({ action, module: "Tasks" });
 
   // advance is only ever called by the assigned person (button is gated below).
   // A task assigned to both partners needs each of them to Accept before Start.
@@ -1750,7 +1781,7 @@ function Progress({ db, mutate, isAdmin = true, currentUser, openTask }) {
   const setProgress = (t, v) => {
     const done = v >= 100;
     const history = done ? [...(t.history || []), { status: "Completed", at: Date.now(), by: currentUser }] : (t.history || []);
-    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, progress: v, status: done ? "Completed" : "In Progress", history } : x) }), done && isAdmin ? { action: `completed "${t.title}"`, module: "Progress" } : null);
+    mutate((d) => ({ ...d, tasks: d.tasks.map((x) => x.id === t.id ? { ...x, progress: v, status: done ? "Completed" : "In Progress", history } : x) }), done ? { action: `completed "${t.title}"`, module: "Progress" } : null);
   };
   return (
     <div className="content">
@@ -1798,7 +1829,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
   const canAct = canActOnTask(t, currentUser);
   const canEdit = canEditTask(t, currentUser, isAdmin);
   const canCollaborate = canAct || canEdit;
-  const auditFor = (action) => (isAdmin ? { action, module: "Tasks" } : null);
+  const auditFor = (action) => ({ action, module: "Tasks" });
 
   const advance = () => {
     const patch = nextTaskState(t, currentUser);
@@ -2150,7 +2181,7 @@ function AuditLog({ db }) {
   );
 }
 
-function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, config, saveTnc }) {
+function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCount, sessionEmail, config, saveTnc, saveCompany }) {
   const fileRef = useRef(null);
   const [importOpen, setImportOpen] = useState(false);
   const exportJSON = () => {
@@ -2184,6 +2215,8 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
       </div>
 
       <TncManager config={config} saveTnc={saveTnc} />
+
+      <CompanySettings config={config} saveCompany={saveCompany} />
 
       <div className="card stat" style={{ marginBottom: 14 }}>
         <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Import from Excel / Google Sheets</div>
@@ -2421,16 +2454,17 @@ function LeaveForm({ initial, me, onSave, onClose }) {
   const [f, setF] = useState(() => ({ type: "Casual", fromDate: todayISO(), toDate: todayISO(), reason: "", ...initial }));
   const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const days = daysBetween(f.fromDate, f.toDate);
-  const valid = f.fromDate && f.toDate && f.toDate >= f.fromDate && f.reason.trim().length > 0;
+  const valid = f.fromDate && f.toDate && f.toDate >= f.fromDate && f.reason.trim().length > 0 && (f.type !== "Other" || (f.customType || "").trim().length > 0);
   const save = () => {
     if (!valid) return;
-    onSave({ ...initial, id: initial?.id || uid(), userId: me.id, userName: me.name, type: f.type, fromDate: f.fromDate, toDate: f.toDate, days, reason: f.reason.trim(), status: initial?.status || "Pending", createdAt: initial?.createdAt || Date.now() });
+    onSave({ ...initial, id: initial?.id || uid(), userId: me.id, userName: me.name, type: f.type === "Other" ? ((f.customType || "").trim() || "Other") : f.type, fromDate: f.fromDate, toDate: f.toDate, days, reason: f.reason.trim(), status: initial?.status || "Pending", createdAt: initial?.createdAt || Date.now() });
     onClose();
   };
   return (
     <Modal title={initial?.id ? "Edit leave request" : "Request leave"} onClose={onClose}
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />Submit request</button></>}>
       <Field label="Leave type"><select className="select" value={f.type} onChange={(e) => up("type", e.target.value)}>{LEAVE_TYPES.map((t) => <option key={t}>{t}</option>)}</select></Field>
+      {f.type === "Other" && <Field label="Specify type" required><input className="input" value={f.customType || ""} onChange={(e) => up("customType", e.target.value)} placeholder="e.g. Bereavement" /></Field>}
       <div className="grid2">
         <Field label="From" required><input className="input" type="date" value={f.fromDate} onChange={(e) => up("fromDate", e.target.value)} /></Field>
         <Field label="To" required><input className="input" type="date" value={f.toDate} min={f.fromDate} onChange={(e) => up("toDate", e.target.value)} /></Field>
@@ -2579,6 +2613,8 @@ function PermsModal({ person, onSave, onClose }) {
 
 function Team({ team, me, changeProfile }) {
   const [permFor, setPermFor] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [manageFor, setManageFor] = useState(null);
   const count = (r) => team.filter((p) => p.role === r).length;
   const setStatus = (p, status) => changeProfile(p.id, { status, active: STATUS_ACTIVE[status] });
   const moduleSummary = (p) => {
@@ -2595,7 +2631,7 @@ function Team({ team, me, changeProfile }) {
   const reject = (p) => changeProfile(p.id, { approved: false, status: "terminated", active: false });
   return (
     <div className="content">
-      <div className="page-head"><h3>Team</h3></div>
+      <div className="page-head"><h3>Team</h3><span className="spacer" />{isSuper && <button className="btn primary" onClick={() => setCreating(true)}><Plus size={16} />Add user</button>}</div>
       {isSuper && pending.length > 0 && (
         <div className="card" style={{ marginBottom: 16 }}>
           <div style={{ padding: "13px 16px", borderBottom: "1px solid var(--border)", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}><Hourglass size={15} /> {pending.length} account{pending.length > 1 ? "s" : ""} awaiting your approval</div>
@@ -2633,8 +2669,8 @@ function Team({ team, me, changeProfile }) {
                   <tr key={p.id} style={p.active === false ? { opacity: .55 } : undefined}>
                     <td>
                       <span className="who-cell">
-                        <span className="avatar" style={{ background: avatarColor(p.name), width: 26, height: 26, fontSize: 11 }}>{p.name[0]}</span>
-                        <span><div style={{ fontWeight: 600 }}>{p.name}{isSelf ? " (you)" : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.email}</div></span>
+                        <span style={{ position: "relative", display: "inline-flex" }}><span className="avatar" style={{ background: avatarColor(p.name), width: 26, height: 26, fontSize: 11 }}>{p.name[0]}</span>{isOnline(p) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</span>
+                        <span><div style={{ fontWeight: 600 }}>{p.name}{isSelf ? " (you)" : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.designation ? p.designation + " · " : ""}{p.email}</div></span>
                       </span>
                     </td>
                     <td>
@@ -2657,6 +2693,7 @@ function Team({ team, me, changeProfile }) {
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <span className="hint-line" style={{ fontSize: 12 }}>{moduleSummary(p)}</span>
                         {p.role === "staff" && <button className="btn sm" onClick={() => setPermFor(p)}><Pencil size={12} />Edit</button>}
+                        {me.role === "superadmin" && !isSelf && <button className="btn sm" onClick={() => setManageFor(p)}><KeyRound size={12} />Manage</button>}
                       </div>
                     </td>
                     <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{p.created_at ? fmtDate(p.created_at.slice(0, 10)) : "—"}</td>
@@ -2671,6 +2708,8 @@ function Team({ team, me, changeProfile }) {
         </div>
       </div>
       {permFor && <PermsModal person={permFor} onClose={() => setPermFor(null)} onSave={(modules) => changeProfile(permFor.id, { perms: { ...(permFor.perms || {}), modules } })} />}
+      {creating && <CreateUserModal onClose={() => setCreating(false)} />}
+      {manageFor && <ManageUserModal person={manageFor} onClose={() => setManageFor(null)} />}
     </div>
   );
 }
@@ -2810,6 +2849,7 @@ const NAV = [
   ["leads", "Leads", UserPlus, "perm:leads"],
   ["clients", "Clients", Building2, "perm:clients"],
   ["quotations", "Quotations", FileText, "perm:clients"],
+  ["invoices", "Invoices", Banknote, "perm:clients"],
   ["portal-posts", "Client updates", ExternalLink, "perm:clients"],
   ["projects", "Projects", FolderKanban, "perm:projects"],
   ["courses", "Courses", GraduationCap, "perm:courses"],
@@ -2819,6 +2859,7 @@ const NAV = [
   ["withdrawals", "Withdrawals", ArrowDownToLine, "finance"],
   ["planned", "Planned expenses", CalendarClock, "finance"],
   ["vault", "Passwords", KeyRound, "vault"],
+  ["notifications", "Notifications", Bell, "everyone"],
   ["announcements", "Announcements", MegaphoneIcon, "collab"],
   ["documents", "Documents", Paperclip, "collab"],
   ["knowledge", "Knowledge base", BookOpen, "collab"],
@@ -2982,7 +3023,7 @@ function NamePicker({ isDark, onChoose }) {
    PHASE 2–6 — FORMS
 ══════════════════════════════════════════════════════════════════════ */
 function LeadForm({ initial, onSave, onClose }) {
-  const [f, setF] = useState(initial || { name: "", phone: "", email: "", source: "Referral", stage: "New", value: "", notes: "" });
+  const [f, setF] = useState(initial || { name: "", company: "", phone: "", email: "", source: "Referral", referredBy: "", leadOwner: "", service: "Website", stage: "New", value: "", notes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
   const save = () => {
@@ -3001,6 +3042,14 @@ function LeadForm({ initial, onSave, onClose }) {
         <Field label="Source"><select className="select" value={f.source} onChange={(e) => set("source", e.target.value)}>{LEAD_SOURCES.map((s) => <option key={s}>{s}</option>)}</select></Field>
         <Field label="Stage"><select className="select" value={f.stage} onChange={(e) => set("stage", e.target.value)}>{LEAD_STAGES.map((s) => <option key={s}>{s}</option>)}</select></Field>
       </div>
+      <div className="grid2">
+        <Field label="Company"><input className="input" value={f.company || ""} onChange={(e) => set("company", e.target.value)} placeholder="Business name" /></Field>
+        <Field label="Service interested"><select className="select" value={f.service || "Website"} onChange={(e) => set("service", e.target.value)}>{LEAD_SERVICES.map((x) => <option key={x}>{x}</option>)}</select></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Referred by"><input className="input" value={f.referredBy || ""} onChange={(e) => set("referredBy", e.target.value)} placeholder="Who referred them?" /></Field>
+        <Field label="Lead owner"><input className="input" value={f.leadOwner || ""} onChange={(e) => set("leadOwner", e.target.value)} placeholder="Who owns this lead?" /></Field>
+      </div>
       <Field label="Estimated value (₹)"><input className="input" type="number" value={f.value} onChange={(e) => set("value", e.target.value)} placeholder="0" /></Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="What do they need?" /></Field>
     </Modal>
@@ -3008,7 +3057,7 @@ function LeadForm({ initial, onSave, onClose }) {
 }
 
 function ClientForm({ initial, onSave, onClose, existing }) {
-  const [f, setF] = useState(initial || { name: "", phone: "", email: "", company: "", notes: "" });
+  const [f, setF] = useState(initial || { name: "", phone: "", email: "", company: "", status: "Prospect", notes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
   // duplicate detection on phone / email (ignore the record being edited)
@@ -3026,7 +3075,10 @@ function ClientForm({ initial, onSave, onClose, existing }) {
         <Field label="Phone"><input className="input" value={f.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+91 …" /></Field>
         <Field label="Email"><input className="input" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="name@email" /></Field>
       </div>
-      <Field label="Company"><input className="input" value={f.company} onChange={(e) => set("company", e.target.value)} placeholder="Business name (optional)" /></Field>
+      <div className="grid2">
+        <Field label="Company"><input className="input" value={f.company} onChange={(e) => set("company", e.target.value)} placeholder="Business name (optional)" /></Field>
+        <Field label="Status"><select className="select" value={f.status || "Prospect"} onChange={(e) => set("status", e.target.value)}>{CLIENT_STATUS.map((x) => <option key={x}>{x}</option>)}</select></Field>
+      </div>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything worth remembering" /></Field>
     </Modal>
   );
@@ -3084,7 +3136,7 @@ function QuotationForm({ initial, onSave, onClose, clients, portalClients }) {
 }
 
 function PlannedForm({ initial, onSave, onClose }) {
-  const [f, setF] = useState(initial || { title: "", category: "Office Rent", amount: "", recurrence: "Monthly", nextDue: todayISO(), notes: "" });
+  const [f, setF] = useState(initial || { title: "", category: "Office Rent", amount: "", recurrence: "Monthly", status: "Planned", nextDue: todayISO(), notes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
   const save = () => {
@@ -3103,6 +3155,7 @@ function PlannedForm({ initial, onSave, onClose }) {
         <Field label="Repeats"><select className="select" value={f.recurrence} onChange={(e) => set("recurrence", e.target.value)}>{EXPENSE_RECURRENCE.map((r) => <option key={r}>{r}</option>)}</select></Field>
         <Field label="Next due"><input className="input" type="date" value={f.nextDue} onChange={(e) => set("nextDue", e.target.value)} /></Field>
       </div>
+      <Field label="Status"><select className="select" value={f.status || "Planned"} onChange={(e) => set("status", e.target.value)}>{PLANNED_STATUS.map((x) => <option key={x}>{x}</option>)}</select></Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Optional" /></Field>
     </Modal>
   );
@@ -3141,6 +3194,15 @@ function DocForm({ initial, onSave, onClose }) {
   const [f, setF] = useState(initial || { title: "", category: "Contract", url: "", notes: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
+  const fileRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const pick = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true); setErr("");
+    try { const up = await uploadAttachment(file); setF((s) => ({ ...s, url: up.url, title: s.title || up.name })); }
+    catch (er) { setErr(er.message || "Upload failed."); }
+    finally { setBusy(false); if (e.target) e.target.value = ""; }
+  };
   const save = () => {
     if (!f.title.trim()) { setErr("Add a title."); return; }
     if (!f.url.trim()) { setErr("Add a link to the file."); return; }
@@ -3153,7 +3215,13 @@ function DocForm({ initial, onSave, onClose }) {
         <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. NDA template" /></Field>
         <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{DOC_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
       </div>
-      <Field label="Link" required hint="Paste a Drive / Dropbox / web link."><input className="input" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://…" /></Field>
+      <Field label="File or link" required hint="Upload (image ≤10MB, PDF ≤50MB, other ≤25MB) or paste a link.">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input className="input" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://… or upload →" />
+          <button className="btn" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>{busy ? <RefreshCw size={15} className="spin" /> : <Upload size={15} />}Upload</button>
+          <input ref={fileRef} type="file" onChange={pick} style={{ display: "none" }} />
+        </div>
+      </Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
     </Modal>
   );
@@ -3270,7 +3338,7 @@ function Leads({ db, mutate, openModal, removeItem, isAdmin }) {
   const setLeadStage = (l, s) => mutate((d) => ({ ...d, leads: d.leads.map((x) => x.id === l.id ? { ...x, stage: s } : x) }), { action: `moved lead "${l.name}" to ${s}`, module: "Leads" });
   const convert = (l) => openModal({ type: "client", initial: { name: l.name, phone: l.phone, email: l.email, notes: l.notes }, fromLead: l.id });
   const del = (l) => removeItem("leads", l, { name: l.name, audit: `deleted lead "${l.name}"` });
-  const tone = (s) => s === "Won" ? "pos" : s === "Lost" ? "neg" : s === "Proposal" ? "accent" : "pri";
+  const tone = (s) => s === "Converted" ? "pos" : s === "Lost" ? "neg" : s === "Proposal Sent" ? "accent" : "pri";
   return (
     <div className="content">
       <div className="page-head"><h3>Leads</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "lead" })}><Plus size={16} />New lead</button></div>
@@ -3289,7 +3357,7 @@ function Leads({ db, mutate, openModal, removeItem, isAdmin }) {
               </div>
               <div className="row-actions" style={{ alignItems: "center" }}>
                 <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={l.stage} onChange={(e) => setLeadStage(l, e.target.value)}>{LEAD_STAGES.map((s) => <option key={s}>{s}</option>)}</select>
-                {l.stage === "Won" && <button className="btn sm primary" onClick={() => convert(l)}><ArrowRight size={13} />Client</button>}
+                {l.stage === "Converted" && <button className="btn sm primary" onClick={() => convert(l)}><ArrowRight size={13} />Client</button>}
                 <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "lead", initial: l })}><Pencil size={14} /></button>
                 <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete lead?", body: `Delete "${l.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(l) })}><Trash2 size={14} /></button>
               </div>
@@ -3301,11 +3369,12 @@ function Leads({ db, mutate, openModal, removeItem, isAdmin }) {
   );
 }
 
-function Clients({ db, mutate, openModal, removeItem }) {
+function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me }) {
   const [q, setQ] = useState("");
   const [n, setN] = useState(25);
   const all = [...db.clients].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const list = q.trim() ? all.filter((c) => (c.name + " " + (c.company || "") + " " + (c.phone || "") + " " + (c.email || "")).toLowerCase().includes(q.toLowerCase())) : all;
+  const scoped = isAdmin ? all : all.filter((c) => c.ownerId === (me && me.id));
+  const list = q.trim() ? scoped.filter((c) => (c.name + " " + (c.company || "") + " " + (c.phone || "") + " " + (c.email || "")).toLowerCase().includes(q.toLowerCase())) : scoped;
   const del = (c) => removeItem("clients", c, { name: c.name, audit: `removed client "${c.name}"` });
   const quote = (c) => openModal({ type: "quotation", initial: { client: c.name } });
   return (
@@ -3318,7 +3387,7 @@ function Clients({ db, mutate, openModal, removeItem }) {
             <thead><tr><th>Client</th><th>Contact</th><th>Added</th><th></th></tr></thead>
             <tbody>{list.slice(0, n).map((c) => (
               <tr key={c.id}>
-                <td><div style={{ fontWeight: 600 }}>{c.name}</div>{c.company && <div className="hint-line" style={{ fontSize: 11 }}>{c.company}</div>}</td>
+                <td><div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>{c.name}{c.status && <span className={"badge " + (c.status === "Blacklisted" ? "neg" : c.status === "Active" ? "pos" : c.status === "Inactive" ? "" : "pri")} style={{ fontSize: 10 }}>{c.status}</span>}</div>{c.company && <div className="hint-line" style={{ fontSize: 11 }}>{c.company}</div>}</td>
                 <td>{c.phone && <div style={{ fontSize: 13 }}>{c.phone}</div>}{c.email && <div className="hint-line" style={{ fontSize: 11 }}>{c.email}</div>}{!c.phone && !c.email && "—"}</td>
                 <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{c.createdAt ? fmtDate(new Date(c.createdAt).toISOString().slice(0, 10)) : "—"}</td>
                 <td><div className="row-actions">
@@ -3392,11 +3461,12 @@ function Planned({ db, mutate, openModal, removeItem, openIncome, canFinance }) 
             <thead><tr><th>Expense</th><th>Repeats</th><th>Next due</th><th className="num-cell">Amount</th><th></th></tr></thead>
             <tbody>{list.map((p) => (
               <tr key={p.id}>
-                <td><div style={{ fontWeight: 600 }}>{p.title}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.category}</div></td>
+                <td><div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>{p.title}{p.status && <span className={"badge " + (p.status === "Purchased" ? "pos" : p.status === "Cancelled" ? "neg" : p.status === "Approved" ? "accent" : "pri")} style={{ fontSize: 10 }}>{p.status}</span>}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.category}</div></td>
                 <td>{p.recurrence}</td>
                 <td><span className={"badge " + dueTone(p)}>{p.nextDue ? fmtDate(p.nextDue) : "—"}</span></td>
                 <td className="num-cell mono">{money(p.amount)}</td>
                 <td><div className="row-actions">
+                  <select className="select" style={{ width: "auto", padding: "4px 6px" }} value={p.status || "Planned"} onChange={(e) => mutate((d) => ({ ...d, planned: d.planned.map((x) => x.id === p.id ? { ...x, status: e.target.value } : x) }), { action: `set planned "${p.title}" to ${e.target.value}`, module: "Planned expenses" })}>{PLANNED_STATUS.map((x) => <option key={x}>{x}</option>)}</select>
                   {canFinance && <button className="btn sm primary" onClick={() => recordPaid(p)}>Log expense</button>}
                   <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "planned", initial: p })}><Pencil size={14} /></button>
                   <button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete?", body: `Delete "${p.title}"?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={14} /></button>
@@ -3415,7 +3485,9 @@ function Vault({ db, mutate, openModal, removeItem }) {
   const all = [...db.vault].sort((a, b) => (a.service || "").localeCompare(b.service || ""));
   const list = q.trim() ? all.filter((v) => (v.service + " " + (v.category || "") + " " + (v.username || "")).toLowerCase().includes(q.toLowerCase())) : all;
   const del = (v) => removeItem("vault", v, { name: v.service, audit: `deleted credential "${v.service}"` });
-  const copy = (t) => { try { navigator.clipboard?.writeText(t || ""); } catch { /* clipboard may be blocked */ } };
+  const logVault = (action) => mutate((d) => d, { action, module: "Passwords" });
+  const copy = (t, v, what) => { try { navigator.clipboard?.writeText(t || ""); logVault(`copied ${what} for "${v.service}"`); } catch { /* clipboard may be blocked */ } };
+  const toggleReveal = (v) => setReveal((r) => { const now = !r[v.id]; if (now) logVault(`viewed password for "${v.service}"`); return { ...r, [v.id]: now }; });
   return (
     <div className="content">
       <div className="page-head"><h3>Passwords</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "vault" })}><Plus size={16} />New credential</button></div>
@@ -3429,10 +3501,10 @@ function Vault({ db, mutate, openModal, removeItem }) {
                 <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{v.service}</div><div className="sub">{v.category}</div></div>
                 <span className="tag">{v.category}</span>
               </div>
-              {v.username && <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}><span className="hint-line" style={{ minWidth: 64 }}>User</span><span className="mono" style={{ flex: 1, wordBreak: "break-all" }}>{v.username}</span><button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.username)}><Copy size={13} /></button></div>}
+              {v.username && <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}><span className="hint-line" style={{ minWidth: 64 }}>User</span><span className="mono" style={{ flex: 1, wordBreak: "break-all" }}>{v.username}</span><button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.username, v, "username")}><Copy size={13} /></button></div>}
               <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}><span className="hint-line" style={{ minWidth: 64 }}>Pass</span><span className="mono" style={{ flex: 1 }}>{reveal[v.id] ? v.password : "••••••••"}</span>
-                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => setReveal((r) => ({ ...r, [v.id]: !r[v.id] }))}>{reveal[v.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>
-                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.password)}><Copy size={13} /></button>
+                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => toggleReveal(v)}>{reveal[v.id] ? <EyeOff size={13} /> : <Eye size={13} />}</button>
+                <button className="iconbtn" style={{ width: 28, height: 28 }} onClick={() => copy(v.password, v, "password")}><Copy size={13} /></button>
               </div>
               {v.url && <a className="hint-line" href={v.url} target="_blank" rel="noreferrer" style={{ color: "var(--primary)", fontSize: 12.5, display: "inline-flex", alignItems: "center", gap: 5 }}><ExternalLink size={12} />Open login</a>}
               <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
@@ -3537,30 +3609,47 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
   );
 }
 
-function Chat({ db, mutate, me }) {
+function Chat({ db, mutate, me, team }) {
   const [text, setText] = useState("");
   const [editId, setEditId] = useState(null);
   const [editText, setEditText] = useState("");
   const endRef = useRef(null);
+  const fileRef = useRef(null);
+  const [busy, setBusy] = useState(false);
   const list = [...db.chat].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
+  // Read receipts: mark messages from others as seen by me (converges once all seen).
+  useEffect(() => {
+    const unseen = db.chat.filter((m) => m.userId !== me.id && !(m.seenBy || []).includes(me.id));
+    if (!unseen.length) return;
+    const ids = new Set(unseen.map((m) => m.id));
+    mutate((d) => ({ ...d, chat: d.chat.map((m) => ids.has(m.id) ? { ...m, seenBy: Array.from(new Set([...(m.seenBy || []), me.id])) } : m) }), null);
+  }, [db.chat, me.id, mutate]);
   const send = () => {
     const t = text.trim(); if (!t) return;
     setText("");
     mutate((d) => ({ ...d, chat: [...d.chat, { id: uid(), userId: me.id, userName: me.name, text: t, createdAt: Date.now() }] }), null);
   };
+  const attach = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true);
+    try { const up = await uploadAttachment(file); mutate((d) => ({ ...d, chat: [...d.chat, { id: uid(), userId: me.id, userName: me.name, text: "", attachment: up, createdAt: Date.now() }] }), null); }
+    catch (er) { alert(er.message || "Upload failed."); }
+    finally { setBusy(false); if (e.target) e.target.value = ""; }
+  };
+  const onlineCount = (team || []).filter((p) => p.id !== me.id && isOnline(p)).length;
   const startEdit = (m) => { setEditId(m.id); setEditText(m.text); };
   const saveEdit = (m) => { const t = editText.trim(); if (!t) { setEditId(null); return; } mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, text: t, editedAt: Date.now() } : x) }), null); setEditId(null); setEditText(""); };
   return (
     <div className="content" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 160px)" }}>
-      <div className="page-head"><h3>Team chat</h3></div>
+      <div className="page-head"><h3>Team chat</h3><span className="spacer" />{onlineCount > 0 && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--pos)", display: "inline-block" }} />{onlineCount} online</span>}</div>
       <div className="card" style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         {list.length === 0 ? <Empty icon={<Send size={22} color="var(--muted)" />} title="Say hello 👋" text="This channel is shared with the whole internal team." />
           : list.map((m) => {
             const mine = m.userId === me.id;
             return (
               <div key={m.id} style={{ display: "flex", gap: 10, flexDirection: mine ? "row-reverse" : "row" }}>
-                <div className="avatar" style={{ background: avatarColor(m.userName), width: 30, height: 30, fontSize: 12, flex: "none" }}>{(m.userName || "?")[0]}</div>
+                <div style={{ position: "relative", flex: "none" }}><div className="avatar" style={{ background: avatarColor(m.userName), width: 30, height: 30, fontSize: 12 }}>{(m.userName || "?")[0]}</div>{isOnline((team || []).find((p) => p.id === m.userId)) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</div>
                 <div style={{ maxWidth: "72%" }}>
                   {editId === m.id ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -3568,9 +3657,11 @@ function Chat({ db, mutate, me }) {
                       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}><button className="btn sm" onClick={() => { setEditId(null); setEditText(""); }}>Cancel</button><button className="btn sm primary" onClick={() => saveEdit(m)}><Check size={13} />Save</button></div>
                     </div>
                   ) : (
-                    <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                    <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}{m.attachment && ((m.attachment.type || "").startsWith("image/")
+                      ? <a href={m.attachment.url} target="_blank" rel="noreferrer"><img src={m.attachment.url} alt={m.attachment.name || ""} style={{ display: "block", maxWidth: 220, maxHeight: 220, borderRadius: 8, marginTop: m.text ? 8 : 0 }} /></a>
+                      : <a href={m.attachment.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: m.text ? 8 : 0, color: mine ? "#fff" : "var(--primary)", textDecoration: "underline" }}><Paperclip size={13} />{m.attachment.name || "Attachment"}</a>)}</div>
                   )}
-                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}</div>
+                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && (m.seenBy || []).filter((u) => u !== me.id).length > 0 ? " · Seen" : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}</div>
                 </div>
               </div>
             );
@@ -3579,6 +3670,8 @@ function Chat({ db, mutate, me }) {
       </div>
       <div className="composer" style={{ marginTop: 12 }}>
         <textarea className="textarea" style={{ minHeight: 44 }} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Message the team… (Enter to send)" />
+        <button className="btn" type="button" onClick={() => fileRef.current?.click()} disabled={busy} title="Attach a file">{busy ? <RefreshCw size={16} className="spin" /> : <Paperclip size={16} />}</button>
+        <input ref={fileRef} type="file" onChange={attach} style={{ display: "none" }} />
         <button className="btn primary" onClick={send} disabled={!text.trim()}><Send size={16} />Send</button>
       </div>
     </div>
@@ -3591,24 +3684,32 @@ function Performance({ db, team }) {
   const rows = staff.map((p) => {
     const done = db.tasks.filter((t) => t.assignedTo === p.name && t.status === "Completed").length;
     const open = db.tasks.filter((t) => t.assignedTo === p.name && t.status !== "Completed").length;
-    const present = db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month)).length;
+    const myLeads = db.leads.filter((l) => l.ownerId === p.id || l.leadOwner === p.name);
+    const leadsGen = myLeads.length;
+    const leadsWon = myLeads.filter((l) => l.stage === "Converted").length;
+    const hours = round2(sumHours(db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month))));
+    const updateDays = new Set(db.updates.filter((u) => u.userId === p.id && sameMonth(u.date, month)).map((u) => u.date)).size;
     const points = db.rewards.filter((r) => r.userId === p.id).reduce((s, r) => s + (Number(r.points) || 0), 0);
-    const score = done * 10 + present * 2 + points;
-    return { p, done, open, present, points, score };
+    const score = done * 10 + leadsWon * 15 + Math.round(hours) + updateDays * 3 + points;
+    return { p, done, open, leadsGen, leadsWon, hours, updateDays, points, score };
   }).sort((a, b) => b.score - a.score);
   const medal = (i) => i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}`;
   return (
     <div className="content">
       <div className="page-head"><h3>Performance</h3></div>
+      <div className="sumrow" style={{ marginBottom: 14 }}>
+        <div className="card"><div className="k"><TrendingUp size={14} /> Revenue this month</div><div className="v mono">{money(db.transactions.filter((t) => t.kind === "income" && sameMonth(t.date, month)).reduce((s, t) => s + (Number(t.amount) || 0), 0))}</div></div>
+        <div className="card"><div className="k"><UserPlus size={14} /> Leads this month</div><div className="v mono">{db.leads.filter((l) => sameMonth(new Date(l.createdAt || 0).toISOString().slice(0, 10), month)).length}</div></div>
+      </div>
       <div className="card">
         {rows.length === 0 ? <Empty icon={<TrendingUp size={22} color="var(--muted)" />} title="No team data yet" text="As people complete tasks, check in and earn recognition, the leaderboard fills up." />
           : <div style={{ overflowX: "auto" }}><table className="tbl">
-            <thead><tr><th>#</th><th>Member</th><th className="num-cell">Tasks done</th><th className="num-cell">Open</th><th className="num-cell">Days in ({month.toLocaleDateString("en-IN", { month: "short" })})</th><th className="num-cell">Points</th><th className="num-cell">Score</th></tr></thead>
+            <thead><tr><th>#</th><th>Member</th><th className="num-cell">Tasks</th><th className="num-cell">Leads</th><th className="num-cell">Won</th><th className="num-cell">Hours</th><th className="num-cell">Updates</th><th className="num-cell">Points</th><th className="num-cell">Score</th></tr></thead>
             <tbody>{rows.map((r, i) => (
               <tr key={r.p.id}>
                 <td style={{ fontSize: 16 }}>{medal(i)}</td>
                 <td><span className="who-cell"><span className="avatar" style={{ background: avatarColor(r.p.name), width: 26, height: 26, fontSize: 11 }}>{r.p.name[0]}</span><span><div style={{ fontWeight: 600 }}>{r.p.name}</div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[r.p.role]}</div></span></span></td>
-                <td className="num-cell mono">{r.done}</td><td className="num-cell mono">{r.open}</td><td className="num-cell mono">{r.present}</td><td className="num-cell mono">{r.points}</td>
+                <td className="num-cell mono">{r.done}</td><td className="num-cell mono">{r.leadsGen}</td><td className="num-cell mono">{r.leadsWon}</td><td className="num-cell mono">{r.hours}</td><td className="num-cell mono">{r.updateDays}</td><td className="num-cell mono">{r.points}</td>
                 <td className="num-cell mono" style={{ fontWeight: 700 }}>{r.score}</td>
               </tr>
             ))}</tbody>
@@ -3680,6 +3781,7 @@ function ClientPortal({ db, profile, signOut, isDark }) {
   const myId = profile?.id;
   const posts = [...db.portal_posts].filter((p) => p.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const quotes = [...db.quotations].filter((q) => q.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const invoices = [...db.invoices].filter((iv) => iv.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const statusTone = (s) => s === "Completed" ? "pos" : s === "On hold" ? "neg" : s === "Review" ? "accent" : "pri";
   return (
     <div className="allbee" data-theme={isDark ? "dark" : "light"} style={{ minHeight: "100vh" }}>
@@ -3719,11 +3821,229 @@ function ClientPortal({ db, profile, signOut, isDark }) {
             </table></div>}
           <p className="hint-line" style={{ marginTop: 12 }}>Questions about a quote? Reply to the email from your ALLBEE contact.</p>
         </div>
+
+        <div className="card stat" style={{ marginTop: 16 }}>
+          <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Your invoices</div>
+          {invoices.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No invoices yet.</p>
+            : <div style={{ overflowX: "auto", marginTop: 10 }}><table className="tbl">
+              <thead><tr><th>Invoice</th><th>Payment</th><th>Due</th><th className="num-cell">Amount</th></tr></thead>
+              <tbody>{invoices.map((iv) => (
+                <tr key={iv.id}><td><div style={{ fontWeight: 600 }}>{iv.number || "Invoice"}</div><div className="hint-line" style={{ fontSize: 11 }}>{iv.title || ""}</div></td>
+                  <td><span className={"badge " + (iv.status === "Paid" ? "pos" : iv.status === "Overdue" ? "neg" : "pri")}>{iv.status === "Paid" ? "Paid" : iv.status === "Overdue" ? "Overdue" : "Due"}</span></td>
+                  <td className="mono">{iv.dueDate ? fmtDate(iv.dueDate) : "—"}</td>
+                  <td className="num-cell mono">{money(iv.amount)}</td></tr>
+              ))}</tbody>
+            </table></div>}
+        </div>
       </div>
     </div>
   );
 }
 
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   PHASE 7 — Notifications, Invoices, Company profile
+══════════════════════════════════════════════════════════════════════ */
+function Notifications({ db, mutate, openModal, removeItem, isAdmin, me, profile, team }) {
+  const visible = [...db.notifications].filter((n) => isAdmin || notifVisibleTo(n, profile)).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const levelTone = (l) => l === "Urgent" ? "neg" : l === "Important" ? "accent" : "pri";
+  const audienceLabel = (a) => { if (!a || a === "all") return "Everyone"; if (a.startsWith("user:")) { const u = (team || []).find((x) => x.id === a.slice(5)); return u ? "Only " + u.name : "One person"; } return (NOTIF_AUDIENCES.find((x) => x[0] === a) || [a, a])[1]; };
+  const markRead = (n) => { if ((n.reads || []).includes(me.id)) return; mutate((d) => ({ ...d, notifications: d.notifications.map((x) => x.id === n.id ? { ...x, reads: Array.from(new Set([...(x.reads || []), me.id])) } : x) }), null); };
+  const del = (n) => removeItem("notifications", n, { name: n.title, audit: `deleted notification "${n.title}"` });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Notifications</h3><span className="spacer" />{isAdmin && <button className="btn primary" onClick={() => openModal({ type: "notification" })}><Bell size={16} />New notification</button>}</div>
+      {visible.length === 0 ? <div className="card"><Empty icon={<Bell size={22} color="var(--muted)" />} title="No notifications" text={isAdmin ? "Broadcast an update to everyone, a role, or one person \u2014 with a priority level." : "Notifications from your admins show up here."} action={isAdmin && <button className="btn primary" onClick={() => openModal({ type: "notification" })}><Bell size={16} />New notification</button>} /></div>
+        : <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>{visible.map((n) => {
+          const seen = (n.reads || []).includes(me.id);
+          return (
+            <div key={n.id} className="card stat" style={{ borderLeft: `3px solid var(${n.level === "Urgent" ? "--neg" : "--primary"})` }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700, fontSize: 15 }}>{n.title}</span><span className={"badge " + levelTone(n.level)}>{n.level || "General"}</span>{!seen && !isAdmin && <span className="badge pri">New</span>}</div>
+                  {n.body && <div style={{ marginTop: 6, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{n.body}</div>}
+                  <div className="item-meta" style={{ marginTop: 8 }}><span>{n.by || "Admin"}</span><span>{fmtDateTime(n.createdAt)}</span>{isAdmin && <span><Users size={12} style={{ verticalAlign: -2 }} /> {audienceLabel(n.audience)}</span>}{isAdmin && <span><Check size={12} style={{ verticalAlign: -2 }} /> {(n.reads || []).length} read</span>}</div>
+                  {!isAdmin && !seen && <div style={{ marginTop: 10 }}><button className="btn sm primary" onClick={() => markRead(n)}><Check size={13} />Mark as read</button></div>}
+                  {!isAdmin && seen && <div className="hint-line" style={{ marginTop: 8, display: "inline-flex", alignItems: "center", gap: 5, color: "var(--pos)" }}><BadgeCheck size={13} />Read</div>}
+                </div>
+                {isAdmin && <div className="row-actions"><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => del(n)}><Trash2 size={14} /></button></div>}
+              </div>
+            </div>
+          );
+        })}</div>}
+    </div>
+  );
+}
+
+function NotificationForm({ initial, team, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", body: "", level: "General", audience: "all" });
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const [err, setErr] = useState("");
+  const people = (team || []).filter((p) => p.role !== "client");
+  const save = () => { if (!f.title.trim()) { setErr("Add a title."); return; } onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), reads: f.reads || [] }); };
+  return (
+    <Modal title={f.id ? "Edit notification" : "New notification"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Bell size={15} />Send</button></>}>
+      <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Office closed Friday" /></Field>
+      <Field label="Message"><textarea className="textarea" value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="Details\u2026" /></Field>
+      <div className="grid2">
+        <Field label="Priority"><select className="select" value={f.level} onChange={(e) => set("level", e.target.value)}>{NOTIF_LEVELS.map((l) => <option key={l}>{l}</option>)}</select></Field>
+        <Field label="Send to"><select className="select" value={f.audience} onChange={(e) => set("audience", e.target.value)}>{NOTIF_AUDIENCES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}<optgroup label="One person">{people.map((p) => <option key={p.id} value={"user:" + p.id}>{p.name}</option>)}</optgroup></select></Field>
+      </div>
+    </Modal>
+  );
+}
+
+function Invoices({ db, mutate, openModal, removeItem, portalClients }) {
+  const [status, setStatus] = useState("All");
+  const all = [...db.invoices].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const list = status === "All" ? all : all.filter((iv) => iv.status === status);
+  const setIvStatus = (iv, sv) => mutate((d) => ({ ...d, invoices: d.invoices.map((x) => x.id === iv.id ? { ...x, status: sv, paid: sv === "Paid" } : x) }), { action: `marked invoice ${iv.number || ""} for ${iv.client} ${sv}`, module: "Invoices" });
+  const del = (iv) => removeItem("invoices", iv, { name: (iv.number || "Invoice") + " \u00b7 " + iv.client, audit: `deleted invoice for ${iv.client}` });
+  const tone = (sv) => sv === "Paid" ? "pos" : sv === "Overdue" ? "neg" : sv === "Sent" ? "pri" : sv === "Cancelled" ? "" : "accent";
+  const outstanding = all.filter((iv) => iv.status === "Sent" || iv.status === "Overdue").reduce((a, iv) => a + (Number(iv.amount) || 0), 0);
+  const paid = all.filter((iv) => iv.status === "Paid").reduce((a, iv) => a + (Number(iv.amount) || 0), 0);
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Invoices</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "invoice" })}><Plus size={16} />New invoice</button></div>
+      <div className="sumrow">
+        <div className="card"><div className="k"><Banknote size={14} /> Outstanding</div><div className="v mono">{money(outstanding)}</div></div>
+        <div className="card"><div className="k"><BadgeCheck size={14} /> Paid</div><div className="v mono">{money(paid)}</div></div>
+      </div>
+      <div className="toolbar"><div className="seg">{["All", ...INVOICE_STATUS].map((sv) => <button key={sv} className={status === sv ? "on" : ""} onClick={() => setStatus(sv)}>{sv}</button>)}</div></div>
+      <div className="card">
+        {list.length === 0 ? <Empty icon={<FileText size={22} color="var(--muted)" />} title="No invoices" text="Raise an invoice, track its payment, and optionally share it to the client portal." action={<button className="btn primary" onClick={() => openModal({ type: "invoice" })}><Plus size={16} />New invoice</button>} />
+          : <div style={{ overflowX: "auto" }}><table className="tbl">
+            <thead><tr><th>Invoice</th><th>Client</th><th>Status</th><th>Due</th><th className="num-cell">Amount</th><th></th></tr></thead>
+            <tbody>{list.map((iv) => (
+              <tr key={iv.id}>
+                <td><div style={{ fontWeight: 600 }}>{iv.number || "\u2014"}</div>{iv.title && <div className="hint-line" style={{ fontSize: 11 }}>{iv.title}</div>}</td>
+                <td>{iv.client}{iv.clientId && <span className="badge accent" style={{ marginLeft: 6, fontSize: 10 }}>Shared</span>}</td>
+                <td><select className="select" style={{ width: "auto", padding: "4px 6px" }} value={iv.status || "Draft"} onChange={(e) => setIvStatus(iv, e.target.value)}>{INVOICE_STATUS.map((sv) => <option key={sv}>{sv}</option>)}</select></td>
+                <td><span className={"badge " + (iv.dueDate && iv.status !== "Paid" && iv.dueDate < todayISO() ? "neg" : "")}>{iv.dueDate ? fmtDate(iv.dueDate) : "\u2014"}</span></td>
+                <td className="num-cell mono" style={{ fontWeight: 700 }}>{money(iv.amount)}</td>
+                <td><div className="row-actions"><span className={"badge " + tone(iv.status)}>{iv.status || "Draft"}</span><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "invoice", initial: iv })}><Pencil size={14} /></button><button className="iconbtn" style={{ width: 30, height: 30 }} onClick={() => openModal({ type: "deleteConfirm", title: "Delete invoice?", body: `Delete this invoice for ${iv.client}?`, note: "Moves to Recently deleted \u2014 restore within 60 days.", onConfirm: () => del(iv) })}><Trash2 size={14} /></button></div></td>
+              </tr>
+            ))}</tbody>
+          </table></div>}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceForm({ initial, clients, portalClients, onSave, onClose }) {
+  const [f, setF] = useState(initial || { number: "INV-" + String(Date.now()).slice(-5), client: "", clientId: "", title: "", amount: "", status: "Draft", dueDate: todayISO(), notes: "" });
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => { if (!f.client.trim()) { setErr("Add a client."); return; } onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), client: f.client.trim(), amount: Number(f.amount) || 0 }); };
+  return (
+    <Modal title={f.id ? "Edit invoice" : "New invoice"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save invoice</button></>}>
+      <div className="grid2">
+        <Field label="Invoice #"><input className="input" value={f.number} onChange={(e) => set("number", e.target.value)} placeholder="INV-001" /></Field>
+        <Field label="Status"><select className="select" value={f.status} onChange={(e) => set("status", e.target.value)}>{INVOICE_STATUS.map((sv) => <option key={sv}>{sv}</option>)}</select></Field>
+      </div>
+      <Field label="Client" required error={err}>
+        <input className="input" list="inv-clients" value={f.client} onChange={(e) => set("client", e.target.value)} placeholder="Client name" />
+        <datalist id="inv-clients">{(clients || []).map((c) => <option key={c.id} value={c.name} />)}</datalist>
+      </Field>
+      <Field label="Description"><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Website \u2014 milestone 1" /></Field>
+      <div className="grid2">
+        <Field label="Amount (\u20b9)"><input className="input mono" type="number" value={f.amount} onChange={(e) => set("amount", e.target.value)} placeholder="0" /></Field>
+        <Field label="Due date"><input className="input" type="date" value={f.dueDate} onChange={(e) => set("dueDate", e.target.value)} /></Field>
+      </div>
+      {portalClients && portalClients.length > 0 && (
+        <Field label="Share to portal client" hint="Optional \u2014 lets that client see this invoice and its payment status.">
+          <select className="select" value={f.clientId} onChange={(e) => set("clientId", e.target.value)}>
+            <option value="">Don't share</option>
+            {portalClients.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.email})</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Payment terms, bank details, etc." /></Field>
+    </Modal>
+  );
+}
+
+function CompanySettings({ config, saveCompany }) {
+  const init = (() => { try { return JSON.parse((config && config.company) || "{}") || {}; } catch { return {}; } })();
+  const [f, setF] = useState({ name: "ALLBEE Solutions", logoUrl: "", address: "", email: "", phone: "", website: "", ...init });
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const set = (k, v) => { setF((x) => ({ ...x, [k]: v })); setDone(false); };
+  const save = async () => { setBusy(true); try { await saveCompany(f); setDone(true); } finally { setBusy(false); } };
+  return (
+    <div className="card stat" style={{ marginBottom: 14 }}>
+      <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Company profile</div>
+      <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>Shown on the client portal and used on quotations and invoices.</p>
+      <div className="grid2">
+        <Field label="Company name"><input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="ALLBEE Solutions" /></Field>
+        <Field label="Logo URL"><input className="input" value={f.logoUrl} onChange={(e) => set("logoUrl", e.target.value)} placeholder="https://\u2026/logo.png" /></Field>
+      </div>
+      <Field label="Address"><textarea className="textarea" value={f.address} onChange={(e) => set("address", e.target.value)} placeholder="Street, city, PIN" /></Field>
+      <div className="grid2">
+        <Field label="Email"><input className="input" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="hello@allbee.in" /></Field>
+        <Field label="Phone"><input className="input" value={f.phone} onChange={(e) => set("phone", e.target.value)} placeholder="+91 \u2026" /></Field>
+      </div>
+      <Field label="Website"><input className="input" value={f.website} onChange={(e) => set("website", e.target.value)} placeholder="https://allbee.in" /></Field>
+      <button className="btn primary" onClick={save} disabled={busy}>{busy ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}{done ? "Saved" : "Save company profile"}</button>
+    </div>
+  );
+}
+
+function CreateUserModal({ onClose }) {
+  const [f, setF] = useState({ name: "", email: "", password: "", role: "staff" });
+  const set = (k, v) => setF((x) => ({ ...x, [k]: v }));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [ok, setOk] = useState(false);
+  const create = async () => {
+    if (!f.email.trim() || f.password.length < 6) { setErr("Enter an email and a password of at least 6 characters."); return; }
+    setBusy(true); setErr("");
+    try {
+      const { data, error } = await supabase.functions.invoke("admin-users", { body: { action: "create", email: f.email.trim(), password: f.password, name: f.name.trim(), role: f.role } });
+      if (error) throw error;
+      if (data && data.error) throw new Error(data.error);
+      setOk(true);
+    } catch (e) { setErr((e && e.message) || "Couldn't create the user. Is the admin-users function deployed?"); }
+    finally { setBusy(false); }
+  };
+  if (ok) return <Modal title="User created" onClose={onClose} footer={<button className="btn primary" onClick={onClose}>Done</button>}><p className="hint-line" style={{ lineHeight: 1.6 }}>{f.name || f.email} can now sign in with the email and password you set. The account is confirmed and approved.</p></Modal>;
+  return (
+    <Modal title="Add a user" onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={create} disabled={busy}>{busy ? <RefreshCw size={15} className="spin" /> : <Plus size={15} />}Create user</button></>}>
+      <div className="grid2">
+        <Field label="Full name"><input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="Priya Sharma" /></Field>
+        <Field label="Role"><select className="select" value={f.role} onChange={(e) => set("role", e.target.value)}>{ROLE_OPTIONS.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}</select></Field>
+      </div>
+      <Field label="Email" required><input className="input" type="email" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="name@allbee.in" /></Field>
+      <Field label="Password" required hint="At least 6 characters. Share it with them securely."><input className="input" type="text" value={f.password} onChange={(e) => set("password", e.target.value)} placeholder="Temporary password" /></Field>
+      {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
+      <p className="hint-line" style={{ marginTop: 8 }}>Requires the <b>admin-users</b> edge function to be deployed.</p>
+    </Modal>
+  );
+}
+
+function ManageUserModal({ person, onClose }) {
+  const [designation, setDesignation] = useState(person.designation || "");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const call = async (body) => { setBusy(true); setMsg(""); setErr(""); try { const { data, error } = await supabase.functions.invoke("admin-users", { body }); if (error) throw error; if (data && data.error) throw new Error(data.error); return true; } catch (e) { setErr((e && e.message) || "Action failed. Is the admin-users function deployed?"); return false; } finally { setBusy(false); } };
+  const saveDes = async () => { if (await call({ action: "set_designation", userId: person.id, designation })) setMsg("Job title updated."); };
+  const resetPw = async () => { if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; } if (await call({ action: "reset_password", userId: person.id, password: pw })) { setMsg("Password reset."); setPw(""); } };
+  return (
+    <Modal title={"Manage " + person.name} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
+      <Field label="Job title / designation"><div style={{ display: "flex", gap: 8 }}><input className="input" value={designation} onChange={(e) => setDesignation(e.target.value)} placeholder="e.g. Senior Developer" /><button className="btn primary" onClick={saveDes} disabled={busy}>Save</button></div></Field>
+      <Field label="Reset password" hint="Sets a new password for this user immediately."><div style={{ display: "flex", gap: 8 }}><input className="input" type="text" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="New password" /><button className="btn primary" onClick={resetPw} disabled={busy}>Reset</button></div></Field>
+      {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
+      {msg && <div className="auth-msg ok"><Check size={14} /> {msg}</div>}
+      <p className="hint-line" style={{ marginTop: 8 }}>Requires the <b>admin-users</b> edge function to be deployed.</p>
+    </Modal>
+  );
+}
 
 export default function App() {
   const [db, setDb] = useState(null);
@@ -3742,6 +4062,9 @@ export default function App() {
   const [taskDetailId, setTaskDetailId] = useState(null); // full-page task detail
   const [config, setConfig] = useState(null);             // app_config (T&C body + version)
   const [locks, setLocks] = useState([]);                 // locked financial periods ('YYYY-MM')
+  const [navOrder, setNavOrder] = useState(() => { try { return JSON.parse(localStorage.getItem("allbee_navorder") || "null") || []; } catch { return []; } });
+  const [favorites, setFavorites] = useState(() => { try { return JSON.parse(localStorage.getItem("allbee_favs") || "null") || []; } catch { return []; } });
+  const dragNavRef = useRef(null);
 
   const currentUser = profile?.name || null;
   const role = profile?.role;
@@ -3836,7 +4159,7 @@ export default function App() {
     };
     mutate(
       (d) => ({ ...d, [table]: d[table].filter((x) => x.id !== item.id), recycle: [...d.recycle, rec] }),
-      isAdmin ? { action: opts.audit || `deleted ${module.toLowerCase()} "${name}"`, module } : null
+      { action: opts.audit || `deleted ${module.toLowerCase()} "${name}"`, module }
     );
   }, [mutate, currentUser, isAdmin, me.id]);
 
@@ -3849,7 +4172,7 @@ export default function App() {
         [rec.table]: exists ? d[rec.table] : [...(d[rec.table] || []), rec.item],
         recycle: d.recycle.filter((r) => r.id !== rec.id),
       };
-    }, isAdmin ? { action: `restored ${rec.module.toLowerCase()} "${rec.name}"`, module: rec.module } : null);
+    }, { action: `restored ${rec.module.toLowerCase()} "${rec.name}"`, module: rec.module });
   }, [mutate, isAdmin]);
 
   // Auto-cleanup: permanently drop recycle rows older than 60 days. Runs once
@@ -3892,6 +4215,10 @@ export default function App() {
     await saveConfig({ tnc_body: body, tnc_version: next });
     if (session) setConfig(await fetchConfig());
   }, [config, session]);
+  const saveCompany = useCallback(async (obj) => {
+    await saveConfig({ company: JSON.stringify(obj || {}) });
+    if (session) setConfig(await fetchConfig());
+  }, [session]);
 
   const signOut = async () => { setUserMenu(false); await supabase.auth.signOut(); };
 
@@ -3924,6 +4251,15 @@ export default function App() {
     return () => window.removeEventListener("hashchange", apply);
   }, []);
 
+  // Presence heartbeat: mark me active so teammates see an "online" dot.
+  useEffect(() => {
+    if (!session || !me.id) return;
+    const beat = () => { if (typeof document !== "undefined" && document.visibilityState === "hidden") return; supabase.from("profiles").update({ last_active: new Date().toISOString() }).eq("id", me.id).then(() => {}, () => {}); };
+    beat();
+    const t = setInterval(beat, 60000);
+    return () => clearInterval(t);
+  }, [session, me.id]);
+
   // open income form prefilled (used by projects / courses / marketing)
   const openIncome = (prefill) => setModal({ type: "income", initial: prefill, source: prefill?.source });
 
@@ -3955,7 +4291,7 @@ export default function App() {
       else next.tasks = [...d.tasks, t];
       if (fromConcept) next.concepts = d.concepts.filter((c) => c.id !== fromConcept);
       return next;
-    }, isAdmin ? { action: `${isUpdate ? "updated" : "created"} task "${t.title}"${!isUpdate && t.num ? ` (#${t.num})` : ""}`, module: "Tasks" } : null);
+    }, { action: `${isUpdate ? "updated" : "created"} task "${t.title}"${!isUpdate && t.num ? ` (#${t.num})` : ""}`, module: "Tasks" });
   };
 
   const saveGeneric = (coll, item, label) => {
@@ -4020,6 +4356,8 @@ export default function App() {
     taskDetailId ? (detailTask ? detailTask.title : "Task") :
     NAV.find((n) => n[0] === safeRoute)?.[1] || "";
   const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || t.assignedTo === currentUser)).length;
+  const pendingLeave = isAdmin ? db.leave.filter((l) => l.status === "Pending").length : 0;
+  const unreadNotifs = db.notifications.filter((n) => notifVisibleTo(n, profile) && !(n.reads || []).includes(me.id)).length;
   const portalClients = team.filter((p) => p.role === "client");
   const unseenAnn = db.announcements.filter((a) => !profile?.notif_seen_at || (a.createdAt || 0) > new Date(profile.notif_seen_at).getTime()).length;
 
@@ -4046,23 +4384,66 @@ export default function App() {
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} me={me} />;
       case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
-      case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "invoices": return <Invoices db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "portal-posts": return <PortalPosts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "planned": return <Planned db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} openIncome={openIncome} canFinance={canFinance} />;
       case "vault": return <Vault db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "notifications": return <Notifications db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} profile={profile} team={team} />;
       case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
-      case "chat": return <Chat db={db} mutate={mutate} me={me} />;
+      case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
-      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} />;
+      case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} saveCompany={saveCompany} />;
       default: return null;
     }
   };
+
+  // Sidebar: favorites pinned on top + drag-to-reorder, persisted locally.
+  const persistNav = (o) => { try { localStorage.setItem("allbee_navorder", JSON.stringify(o)); } catch { /* ignore */ } };
+  const persistFavs = (o) => { try { localStorage.setItem("allbee_favs", JSON.stringify(o)); } catch { /* ignore */ } };
+  const toggleFav = (k) => setFavorites((prev) => { const nx = prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k]; persistFavs(nx); return nx; });
+  const moveNav = (dragK, dropK) => {
+    if (dragK === dropK) return;
+    setNavOrder((prev) => {
+      const base = (prev && prev.length) ? prev.slice() : NAV.map((n) => n[0]);
+      if (!base.includes(dragK)) base.push(dragK);
+      if (!base.includes(dropK)) base.push(dropK);
+      base.splice(base.indexOf(dragK), 1);
+      base.splice(base.indexOf(dropK), 0, dragK);
+      persistNav(base);
+      return base;
+    });
+  };
+  const favSet = new Set(favorites);
+  const navRank = (k) => { const i = (navOrder || []).indexOf(k); return i === -1 ? 1000 + NAV.findIndex((n) => n[0] === k) : i; };
+  const sortedNav = visibleNav.slice().sort((a, b) => navRank(a[0]) - navRank(b[0]));
+  const favNav = sortedNav.filter((n) => favSet.has(n[0]));
+  const restNav = sortedNav.filter((n) => !favSet.has(n[0]));
+  const navBadge = (key) => (
+    <>
+      {key === "tasks" && myPending > 0 && <span className="badge pri">{myPending}</span>}
+      {key === "leave" && pendingLeave > 0 && <span className="badge pri">{pendingLeave}</span>}
+      {key === "notifications" && unreadNotifs > 0 && <span className="badge pri">{unreadNotifs}</span>}
+    </>
+  );
+  const renderNav = ([key, label, Icon]) => (
+    <div key={key} draggable
+      onDragStart={(e) => { dragNavRef.current = key; try { e.dataTransfer.effectAllowed = "move"; } catch { /* ignore */ } }}
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => { e.preventDefault(); if (dragNavRef.current) moveNav(dragNavRef.current, key); dragNavRef.current = null; }}
+      className={"navitem" + (safeRoute === key ? " active" : "")} onClick={() => go(key)} title="Drag to reorder">
+      <Icon size={18} />
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      {navBadge(key)}
+      <button onClick={(e) => { e.stopPropagation(); toggleFav(key); }} title={favSet.has(key) ? "Unpin from favorites" : "Pin to favorites"} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 2, opacity: favSet.has(key) ? 0.95 : 0.3, flex: "none", display: "flex" }}><Star size={13} fill={favSet.has(key) ? "currentColor" : "none"} /></button>
+    </div>
+  );
 
   return (
     <ErrorBoundary>
@@ -4080,12 +4461,10 @@ export default function App() {
               <img className="brand-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 34 }} />
               <div><h1>ALLBEE</h1><p>Solutions</p></div>
             </div>
-            {visibleNav.map(([key, label, Icon]) => (
-              <div key={key} className={"navitem" + (safeRoute === key ? " active" : "")} onClick={() => go(key)}>
-                <Icon size={18} /> {label}
-                {key === "tasks" && myPending > 0 && <span className="badge pri">{myPending}</span>}
-              </div>
-            ))}
+            {favNav.length > 0 && <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", padding: "6px 11px 2px" }}>Favorites</div>}
+            {favNav.map(renderNav)}
+            {favNav.length > 0 && <div style={{ fontSize: 10.5, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", padding: "12px 11px 2px" }}>All modules</div>}
+            {restNav.map(renderNav)}
             <div className="sidebar-foot">
               <div className="navitem" onClick={() => { const nd = !isDark; setIsDark(nd); try { localStorage.setItem("allbee_theme", nd ? "dark" : "light"); } catch { /* ignore */ } }}>{isDark ? <Sun size={18} /> : <Moon size={18} />} {isDark ? "Light mode" : "Dark mode"}</div>
             </div>
@@ -4131,7 +4510,7 @@ export default function App() {
         {modal?.type === "expense" && <ShareForm kind="expense" initial={modal.initial} currentUser={currentUser} onSave={(e) => saveShare(e, modal.source)} onClose={() => setModal(null)} />}
         {modal?.type === "withdraw" && <WithdrawForm balances={bal} defaultUser={currentUser} onSave={(w) => mutate((d) => ({ ...d, withdrawals: [...d.withdrawals, { ...w, status: isSuper ? "approved" : "pending" }] }), { action: `recorded withdrawal of ${money(w.amount)}${isSuper ? "" : " (awaiting approval)"}`, module: "Withdrawals" })} onClose={() => setModal(null)} />}
         {modal?.type === "task" && <TaskForm initial={modal.initial} currentUser={currentUser} team={teamNames} isAdmin={isAdmin} onSave={(t) => saveTask(t, modal.fromConcept)} onClose={() => setModal(null)} />}
-        {modal?.type === "leave" && <LeaveForm initial={modal.initial} me={me} onSave={(l) => mutate((d) => ({ ...d, leave: d.leave.some((x) => x.id === l.id) ? d.leave.map((x) => x.id === l.id ? l : x) : [...d.leave, l] }), null)} onClose={() => setModal(null)} />}
+        {modal?.type === "leave" && <LeaveForm initial={modal.initial} me={me} onSave={(l) => mutate((d) => ({ ...d, leave: d.leave.some((x) => x.id === l.id) ? d.leave.map((x) => x.id === l.id ? l : x) : [...d.leave, l] }), { action: (db.leave.some((x) => x.id === l.id) ? "updated " : "submitted ") + l.type + " leave request", module: "Leave" })} onClose={() => setModal(null)} />}
         {modal?.type === "project" && <ProjectForm initial={modal.initial} onSave={(p) => saveGeneric("projects", p, "project")} onClose={() => setModal(null)} />}
         {modal?.type === "student" && <StudentForm initial={modal.initial} onSave={(s) => saveGeneric("students", s, "student")} onClose={() => setModal(null)} />}
         {modal?.type === "marketing" && <MarketingForm initial={modal.initial} onSave={(m) => saveGeneric("marketing", m, "marketing client")} onClose={() => setModal(null)} />}
@@ -4139,11 +4518,13 @@ export default function App() {
         {modal?.type === "lead" && <LeadForm initial={modal.initial} onSave={(x) => saveOwned("leads", x)} onClose={() => setModal(null)} />}
         {modal?.type === "client" && <ClientForm initial={modal.initial} existing={db.clients} onSave={(x) => { saveOwned("clients", x); }} onClose={() => setModal(null)} />}
         {modal?.type === "quotation" && <QuotationForm initial={modal.initial} clients={db.clients} portalClients={portalClients} onSave={(x) => saveOwned("quotations", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "invoice" && <InvoiceForm initial={modal.initial} clients={db.clients} portalClients={portalClients} onSave={(x) => saveOwned("invoices", x)} onClose={() => setModal(null)} />}
         {modal?.type === "planned" && <PlannedForm initial={modal.initial} onSave={(x) => saveOwned("planned", x)} onClose={() => setModal(null)} />}
         {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(x) => saveOwned("vault", x)} onClose={() => setModal(null)} />}
         {modal?.type === "document" && <DocForm initial={modal.initial} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
         {modal?.type === "knowledge" && <KbForm initial={modal.initial} onSave={(x) => saveOwned("knowledge", x)} onClose={() => setModal(null)} />}
         {modal?.type === "reward" && <RewardForm initial={modal.initial} team={team} onSave={(x) => saveOwned("rewards", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "notification" && <NotificationForm initial={modal.initial} team={team} onSave={(x) => saveOwned("notifications", x)} onClose={() => setModal(null)} />}
         {modal?.type === "announcement" && <AnnouncementForm initial={modal.initial} onSave={(x) => saveOwned("announcements", x)} onClose={() => setModal(null)} />}
         {modal?.type === "portalPost" && <PortalPostForm initial={modal.initial} portalClients={portalClients} onSave={(x) => saveOwned("portal_posts", x)} onClose={() => setModal(null)} />}
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
