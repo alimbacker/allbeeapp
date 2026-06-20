@@ -84,7 +84,8 @@ drop policy if exists notif_insert on public.notifications;
 drop policy if exists notif_update on public.notifications;
 drop policy if exists notif_delete on public.notifications;
 create policy notif_select on public.notifications for select to authenticated using (public.is_internal());
-create policy notif_insert on public.notifications for insert to authenticated with check (public.is_admin());
+create policy notif_insert on public.notifications for insert to authenticated
+  with check (public.is_admin() or id in (select x.id from public.notifications x));
 create policy notif_update on public.notifications for update to authenticated using (public.is_internal()) with check (public.is_internal());
 create policy notif_delete on public.notifications for delete to authenticated using (public.is_admin());
 
@@ -194,6 +195,15 @@ create unique index if not exists profiles_username_key
 
 
 -- ── 9. Chat: read receipts + message sending for internal members ─────────
+-- Insert: your own new message, or an upsert of a row that already exists
+-- (read receipts add you to another message's seenBy → that row is re-saved).
+drop policy if exists chat_insert_internal on public.chat;
+create policy chat_insert_internal on public.chat
+  for insert to authenticated
+  with check (
+    (data->>'userId') = auth.uid()::text
+    or id in (select x.id from public.chat x)
+  );
 drop policy if exists chat_update_internal on public.chat;
 create policy chat_update_internal on public.chat
   for update to authenticated
