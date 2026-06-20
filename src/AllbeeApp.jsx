@@ -7,7 +7,7 @@ import {
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
   ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
-  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote,
+  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote, User,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -2848,7 +2848,76 @@ function ProfileSetup({ profile, onSave, onSignOut, isDark }) {
   );
 }
 
-// Terms gate: shown to accountants/staff/interns until they accept the current
+// Self-service profile page — available to EVERY internal user (admins and staff
+// alike). Same required basics as the first-login gate (full name, mobile, DOB);
+// photo + username optional. Role/designation stay admin-controlled, email is the
+// sign-in identity, so both are shown read-only here.
+function MyProfile({ profile, role, saveMyProfile, sessionEmail }) {
+  const [name, setName] = useState(profile?.name || "");
+  const [mobile, setMobile] = useState(profile?.mobile || "");
+  const [dob, setDob] = useState(profile?.dob || "");
+  const [photo, setPhoto] = useState(profile?.photo_url || "");
+  const [username, setUsername] = useState(profile?.username || "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(false);
+  // re-sync if the profile changes elsewhere (e.g. an admin edits designation)
+  useEffect(() => {
+    setName(profile?.name || ""); setMobile(profile?.mobile || ""); setDob(profile?.dob || "");
+    setPhoto(profile?.photo_url || ""); setUsername(profile?.username || "");
+  }, [profile?.id, profile?.name, profile?.mobile, profile?.dob, profile?.photo_url, profile?.username]);
+  const save = async () => {
+    setErr(""); setDone(false);
+    if (!name.trim()) { setErr("Enter your full name."); return; }
+    if (mobile.replace(/\D/g, "").length < 7) { setErr("Enter a valid mobile number."); return; }
+    if (!dob) { setErr("Add your date of birth."); return; }
+    const uname = username.trim().toLowerCase().replace(/\s+/g, "");
+    setBusy(true);
+    try { await saveMyProfile({ name: name.trim(), mobile: mobile.trim(), dob, photo_url: photo.trim() || null, username: uname || null }); setDone(true); }
+    catch (e) { setErr(e.message || "Couldn't save. That username may already be taken — try another."); }
+    finally { setBusy(false); }
+  };
+  const email = profile?.email || sessionEmail || "";
+  return (
+    <div className="content">
+      <div className="page-head"><h3>My profile</h3></div>
+      <div className="card stat" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <div className="avatar" style={{ background: avatarColor(name || "?"), width: 48, height: 48, fontSize: 19 }}>{(name || "?")[0]}</div>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <div style={{ fontWeight: 700, fontSize: 16 }}>{name || "Your name"}</div>
+          <div className="hint-line" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4, alignItems: "center" }}>
+            <span className="badge accent">{ROLE_LABEL[role] || role}</span>
+            {profile?.designation && <span className="tag">{profile.designation}</span>}
+          </div>
+        </div>
+      </div>
+      <div className="card stat">
+        <div className="lbl" style={{ fontWeight: 700, color: "var(--ink)" }}><User size={14} /> Your details</div>
+        <p className="hint-line" style={{ marginTop: 6, marginBottom: 12 }}>Everyone on the team — admins and staff alike — keeps these basics current. Full name, mobile and date of birth are required.</p>
+        <div className="grid2">
+          <Field label="Full name" required><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Priya Sharma" /></Field>
+          <Field label="Mobile number" required hint="Work contact + birthday wishes."><input className="input" type="tel" value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="+91 …" /></Field>
+        </div>
+        <div className="grid2">
+          <Field label="Date of birth" required><input className="input" type="date" value={dob} onChange={(e) => setDob(e.target.value)} max={todayISO()} /></Field>
+          <Field label="Email" hint="Your sign-in email — ask an admin to change it."><input className="input" value={email} disabled style={{ opacity: .7 }} /></Field>
+        </div>
+        <div className="grid2">
+          <Field label="Username" hint="Optional — sign in with this instead of email."><input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="e.g. priya" /></Field>
+          <Field label="Profile photo URL" hint="Optional — paste an image link."><input className="input" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+        </div>
+        {err && <div className="auth-msg err" style={{ marginTop: 4 }}><AlertTriangle size={14} /> {err}</div>}
+        {done && !err && <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginTop: 8, borderColor: "var(--pos)" }}><BadgeCheck size={15} color="var(--pos)" /> Profile saved.</div>}
+        <div style={{ marginTop: 14 }}>
+          <button className="btn primary" onClick={save} disabled={busy}>{busy ? <RefreshCw size={16} className="spin" /> : <Check size={16} />}Save profile</button>
+        </div>
+      </div>
+      <p className="hint-line" style={{ marginTop: 12 }}>Your role{profile?.designation ? " and job title are" : " is"} set by an admin. You can update the details above any time.</p>
+    </div>
+  );
+}
+
+
 // published version. Editing the terms bumps the version and re-prompts everyone.
 function TermsGate({ body, version, onAccept, onSignOut, isDark }) {
   const [checked, setChecked] = useState(false);
@@ -2974,6 +3043,7 @@ const NAV = [
   ["progress", "Progress", Activity, "admin"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
+  ["profile", "My profile", User, "everyone"],
   ["settings", "Settings", SettingsIcon, "admin"],
 ];
 
@@ -4705,6 +4775,7 @@ export default function App() {
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "terms": return <TermsPage config={config} profile={profile} role={role} isAdmin={isAdmin} go={go} />;
+      case "profile": return <MyProfile profile={profile} role={role} saveMyProfile={saveMyProfile} sessionEmail={session?.user?.email} />;
       case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
