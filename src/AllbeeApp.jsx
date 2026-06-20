@@ -183,6 +183,7 @@ async function fetchAll() {
     }
     db[t] = (data || [])
       .map((r) => r.data)
+      .filter((x) => x && typeof x === "object")   // tolerate a malformed/null row instead of white-screening
       .sort((a, b) => (a?.createdAt || a?.ts || 0) - (b?.createdAt || b?.ts || 0));
   }));
   return db;
