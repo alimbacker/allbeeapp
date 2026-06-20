@@ -168,7 +168,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -238,6 +238,8 @@ async function fetchConfig() {
   for (const r of data || []) out[r.key] = r.value;
   return out;
 }
+function companyOf(config) { try { return JSON.parse((config && config.company) || "{}") || {}; } catch { return {}; } }
+
 async function saveConfig(patch) {
   const rows = Object.entries(patch).map(([key, value]) => ({ key, value: value == null ? "" : String(value) }));
   const { error } = await supabase.from("app_config").upsert(rows, { onConflict: "key" });
@@ -305,7 +307,7 @@ const emptyDB = () => ({
   leads: [], clients: [], quotations: [], planned: [],
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
-  notifications: [], invoices: [],
+  notifications: [], invoices: [], resignations: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -2612,7 +2614,7 @@ function PermsModal({ person, onSave, onClose }) {
   );
 }
 
-function Team({ team, me, changeProfile }) {
+function Team({ team, me, changeProfile, db, resolveResign }) {
   const [permFor, setPermFor] = useState(null);
   const [creating, setCreating] = useState(false);
   const [manageFor, setManageFor] = useState(null);
@@ -2646,6 +2648,23 @@ function Team({ team, me, changeProfile }) {
               <div className="row-actions">
                 <button className="btn sm primary" onClick={() => approve(p)}><Check size={13} />Approve</button>
                 <button className="btn sm danger" onClick={() => reject(p)}><X size={13} />Reject</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {(db?.resignations || []).filter((r) => r.status === "Pending").length > 0 && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div style={{ padding: "13px 16px", borderBottom: "1px solid var(--border)", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}><LogOut size={15} /> Resignation requests</div>
+          {(db.resignations || []).filter((r) => r.status === "Pending").map((r) => (
+            <div key={r.id} className="item-row">
+              <div className="item-main">
+                <div className="item-title" style={{ fontSize: 14 }}>{r.userName}</div>
+                <div className="item-meta"><span>{r.reason}</span>{r.lastDay && <span>Proposed last day: {fmtDate(r.lastDay)}</span>}<span>{fmtDateTime(r.createdAt)}</span></div>
+              </div>
+              <div className="row-actions">
+                <button className="btn sm danger" onClick={() => resolveResign(r, "Approved")}><Check size={13} />Approve &amp; offboard</button>
+                <button className="btn sm" onClick={() => resolveResign(r, "Declined")}><X size={13} />Decline</button>
               </div>
             </div>
           ))}
@@ -2749,6 +2768,7 @@ function ProfileSetup({ profile, onSave, onSignOut, isDark }) {
   const [mobile, setMobile] = useState(profile?.mobile || "");
   const [dob, setDob] = useState(profile?.dob || "");
   const [photo, setPhoto] = useState(profile?.photo_url || "");
+  const [username, setUsername] = useState(profile?.username || "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const save = async () => {
@@ -2756,8 +2776,9 @@ function ProfileSetup({ profile, onSave, onSignOut, isDark }) {
     if (!name.trim()) { setErr("Tell us your full name."); return; }
     if (mobile.replace(/\D/g, "").length < 7) { setErr("Enter a valid mobile number."); return; }
     if (!dob) { setErr("Add your date of birth."); return; }
+    const uname = username.trim().toLowerCase().replace(/\s+/g, "");
     setBusy(true);
-    try { await onSave({ name: name.trim(), mobile: mobile.trim(), dob, photo_url: photo.trim() || null }); }
+    try { await onSave({ name: name.trim(), mobile: mobile.trim(), dob, photo_url: photo.trim() || null, username: uname || null }); }
     catch (e) { setErr(e.message || "Couldn't save that. Try again."); setBusy(false); }
   };
   return (
@@ -2772,6 +2793,7 @@ function ProfileSetup({ profile, onSave, onSignOut, isDark }) {
           <Field label="Mobile number" required hint="Used for work contact and birthday wishes."><input className="input" type="tel" value={mobile} onChange={(e) => setMobile(e.target.value)} placeholder="+91 …" /></Field>
           <Field label="Date of birth" required><input className="input" type="date" value={dob} onChange={(e) => setDob(e.target.value)} max={todayISO()} /></Field>
           <Field label="Profile photo URL" hint="Optional — add or change this any time."><input className="input" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+          <Field label="Username" hint="Optional — lets you sign in with a username instead of your email."><input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="e.g. priya" /></Field>
         </div>
         {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
         <div className="gate-foot">
@@ -2890,6 +2912,8 @@ function parseHash(hash) {
 
 function Lock({ isDark, setDark }) {
   const [mode, setMode] = useState("signin"); // signin | signup
+  const [entry, setEntry] = useState("choose"); // choose | form  (the two-button gate)
+  const [loginAs, setLoginAs] = useState("employee"); // employee | client (display hint)
   const [acctType, setAcctType] = useState("staff"); // staff | owner
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
@@ -2902,7 +2926,7 @@ function Lock({ isDark, setDark }) {
 
   const submit = async () => {
     setErr(""); setNotice("");
-    if (!email.trim() || !pw) { setErr("Enter your email and password to continue."); return; }
+    if (!email.trim() || !pw) { setErr("Enter your username or email and your password to continue."); return; }
     if (mode === "signup") {
       if ((acctType === "staff" || acctType === "client") && !name.trim()) { setErr("Enter your name so we know who you are."); return; }
       if (acctType === "owner" && !code.trim()) { setErr("Enter the admin access code, or sign up as a team member instead."); return; }
@@ -2910,7 +2934,16 @@ function Lock({ isDark, setDark }) {
     setBusy(true);
     try {
       if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: pw });
+        let loginEmail = email.trim();
+        if (!loginEmail.includes("@")) {
+          // username path: resolve to the account email via the edge function
+          try {
+            const { data, error } = await supabase.functions.invoke("username-login", { body: { username: loginEmail } });
+            if (error) throw error;
+            if (data && data.email) loginEmail = data.email; else throw new Error("no-match");
+          } catch (e2) { throw new Error("We couldn't find that username. Try signing in with your email instead."); }
+        }
+        const { error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: pw });
         if (error) throw error;
       } else {
         const meta = acctType === "owner" ? { name: who, admin_code: code.trim() }
@@ -2931,7 +2964,18 @@ function Lock({ isDark, setDark }) {
       <style>{CSS}</style>
       <div className="lock-card">
         <img className="lock-logo" src={LOGO_FULL} alt="ALLBEE Solutions" />
-        <p>{mode === "signin" ? "Sign in to your workspace" : "Create your account"}</p>
+        <p>{mode === "signin" ? (entry === "choose" ? "How would you like to sign in?" : (loginAs === "client" ? "Client sign in" : "Employee sign in")) : "Create your account"}</p>
+
+        {mode === "signin" && entry === "choose" ? (
+          <>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 6, width: "100%" }}>
+              <button className="btn primary" style={{ width: "100%", justifyContent: "center", padding: "13px 14px" }} onClick={() => { setLoginAs("employee"); setEntry("form"); setErr(""); }}><Users size={18} />Employee Login</button>
+              <button className="btn" style={{ width: "100%", justifyContent: "center", padding: "13px 14px" }} onClick={() => { setLoginAs("client"); setEntry("form"); setErr(""); }}><Building2 size={18} />Client Login</button>
+            </div>
+            <button className="linkbtn" onClick={() => { setMode("signup"); setEntry("form"); setAcctType(loginAs === "client" ? "client" : "staff"); setErr(""); setNotice(""); }}>New here? Create an account</button>
+          </>
+        ) : (<>
+        {mode === "signin" && <button className="linkbtn" style={{ marginBottom: 2, alignSelf: "flex-start" }} onClick={() => { setEntry("choose"); setErr(""); }}><ArrowLeft size={14} />Back</button>}
 
         {mode === "signup" && (
           <>
@@ -2970,8 +3014,8 @@ function Lock({ isDark, setDark }) {
 
         <div style={{ textAlign: "left" }}>
           <div className="field">
-            <label>Email</label>
-            <input className="input" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={onKey} placeholder="you@allbee.in" />
+            <label>{mode === "signin" ? "Username or email" : "Email"}</label>
+            <input className="input" type={mode === "signin" ? "text" : "email"} autoComplete={mode === "signin" ? "username" : "email"} value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={onKey} placeholder={mode === "signin" ? "username or you@allbee.in" : "you@allbee.in"} />
           </div>
           <div className="field">
             <label>Password</label>
@@ -2987,9 +3031,10 @@ function Lock({ isDark, setDark }) {
           {mode === "signin" ? "Sign in" : "Create account"}
         </button>
 
-        <button className="linkbtn" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); setNotice(""); }}>
+        <button className="linkbtn" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setEntry("form"); setErr(""); setNotice(""); }}>
           {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
         </button>
+        </>)}
 
         <button className="btn ghost" style={{ marginTop: 18 }} onClick={() => setDark(!isDark)}>
           {isDark ? <Sun size={15} /> : <Moon size={15} />} {isDark ? "Light" : "Dark"} mode
@@ -3086,16 +3131,25 @@ function ClientForm({ initial, onSave, onClose, existing }) {
 }
 
 function QuotationForm({ initial, onSave, onClose, clients, portalClients }) {
-  const [f, setF] = useState(initial || { client: "", clientId: "", title: "", status: "Draft", notes: "", items: [{ desc: "", qty: 1, rate: 0 }] });
+  const [f, setF] = useState(initial || { client: "", clientId: "", title: "", status: "Draft", notes: "", items: [{ desc: "", qty: 1, rate: 0 }], pdfUrl: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const setItem = (i, k, v) => setF((s) => ({ ...s, items: s.items.map((it, j) => j === i ? { ...it, [k]: v } : it) }));
   const addItem = () => setF((s) => ({ ...s, items: [...s.items, { desc: "", qty: 1, rate: 0 }] }));
   const delItem = (i) => setF((s) => ({ ...s, items: s.items.filter((_, j) => j !== i) }));
   const total = (f.items || []).reduce((sum, it) => sum + (Number(it.qty) || 0) * (Number(it.rate) || 0), 0);
   const [err, setErr] = useState("");
+  const pdfRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const pickPdf = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true); setErr("");
+    try { const up = await uploadAttachment(file); setF((s) => ({ ...s, pdfUrl: up.url })); }
+    catch (er) { setErr(er.message || "Upload failed."); }
+    finally { setBusy(false); if (e.target) e.target.value = ""; }
+  };
   const save = () => {
     if (!f.client.trim()) { setErr("Add a client name."); return; }
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), client: f.client.trim(), total: round2(total) });
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), client: f.client.trim(), total: round2(total), pdfUrl: (f.pdfUrl || "").trim() });
   };
   return (
     <Modal title={f.id ? "Edit quotation" : "New quotation"} onClose={onClose}
@@ -3131,6 +3185,13 @@ function QuotationForm({ initial, onSave, onClose, clients, portalClients }) {
         <button className="btn sm" style={{ marginTop: 8 }} onClick={addItem}><Plus size={13} />Add line</button>
       </div>
       <div className="calc-box"><div className="calc-row"><span>Total</span><b className="mono">{money(total)}</b></div></div>
+      <Field label="Attach PDF" hint="Optional — store a PDF of this quotation (≤50MB).">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input className="input" value={f.pdfUrl || ""} onChange={(e) => set("pdfUrl", e.target.value)} placeholder="https://… or upload →" />
+          <button className="btn" type="button" onClick={() => pdfRef.current?.click()} disabled={busy}>{busy ? <RefreshCw size={15} className="spin" /> : <Upload size={15} />}Upload</button>
+          <input ref={pdfRef} type="file" accept="application/pdf" onChange={pickPdf} style={{ display: "none" }} />
+        </div>
+      </Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Terms, validity, etc." /></Field>
     </Modal>
   );
@@ -3191,8 +3252,8 @@ function VaultForm({ initial, onSave, onClose }) {
   );
 }
 
-function DocForm({ initial, onSave, onClose }) {
-  const [f, setF] = useState(initial || { title: "", category: "Contract", url: "", notes: "" });
+function DocForm({ initial, onSave, onClose, team, portalClients }) {
+  const [f, setF] = useState(initial || { title: "", category: "Contract", url: "", notes: "", audience: "internal", userIds: [], clientId: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
@@ -3207,7 +3268,8 @@ function DocForm({ initial, onSave, onClose }) {
   const save = () => {
     if (!f.title.trim()) { setErr("Add a title."); return; }
     if (!f.url.trim()) { setErr("Add a link to the file."); return; }
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), url: f.url.trim() });
+    const norm = { ...f, clientId: f.audience === "client" ? f.clientId : "", userIds: f.audience === "members" ? (f.userIds || []) : [] };
+    onSave({ ...norm, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), url: f.url.trim() });
   };
   return (
     <Modal title={f.id ? "Edit document" : "Add document"} onClose={onClose}
@@ -3223,6 +3285,29 @@ function DocForm({ initial, onSave, onClose }) {
           <input ref={fileRef} type="file" onChange={pick} style={{ display: "none" }} />
         </div>
       </Field>
+      <Field label="Who can see this">
+        <select className="select" value={f.audience} onChange={(e) => set("audience", e.target.value)}>
+          <option value="internal">Everyone (internal team)</option>
+          <option value="members">Specific team members</option>
+          <option value="client">A portal client</option>
+        </select>
+      </Field>
+      {f.audience === "members" && (
+        <Field label="Team members" hint="Only these people (plus admins) can see it.">
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{(team || []).filter((pp) => pp.role !== "client").map((pp) => {
+            const on = (f.userIds || []).includes(pp.id);
+            return <button type="button" key={pp.id} onClick={() => set("userIds", on ? (f.userIds || []).filter((x) => x !== pp.id) : [...(f.userIds || []), pp.id])} style={{ padding: "5px 10px", borderRadius: 999, border: "1px solid var(--border)", background: on ? "var(--primary)" : "var(--surface)", color: on ? "#fff" : "var(--ink)", cursor: "pointer", fontSize: 12.5 }}>{pp.name}</button>;
+          })}</div>
+        </Field>
+      )}
+      {f.audience === "client" && (
+        <Field label="Portal client" hint="Shows in that client's portal under Files.">
+          <select className="select" value={f.clientId} onChange={(e) => set("clientId", e.target.value)}>
+            <option value="">Select a client…</option>
+            {(portalClients || []).map((pp) => <option key={pp.id} value={pp.id}>{pp.name} ({pp.email})</option>)}
+          </select>
+        </Field>
+      )}
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} /></Field>
     </Modal>
   );
@@ -3276,14 +3361,23 @@ function RewardForm({ initial, onSave, onClose, team }) {
 }
 
 function PortalPostForm({ initial, onSave, onClose, portalClients }) {
-  const [f, setF] = useState(initial || { clientId: portalClients?.[0]?.id || "", title: "", body: "", status: "In progress" });
+  const [f, setF] = useState(initial || { clientId: portalClients?.[0]?.id || "", title: "", body: "", status: "In progress", kind: "update", fileUrl: "" });
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const [err, setErr] = useState("");
+  const fileRef = useRef(null);
+  const [busy, setBusy] = useState(false);
+  const pick = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setBusy(true); setErr("");
+    try { const up = await uploadAttachment(file); setF((s) => ({ ...s, fileUrl: up.url, title: s.title || up.name })); }
+    catch (er) { setErr(er.message || "Upload failed."); }
+    finally { setBusy(false); if (e.target) e.target.value = ""; }
+  };
   const save = () => {
     if (!f.clientId) { setErr("Pick a client."); return; }
     if (!f.title.trim()) { setErr("Add a heading."); return; }
     const person = (portalClients || []).find((p) => p.id === f.clientId);
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), clientName: person?.name || "", title: f.title.trim(), meetingLink: (f.meetingLink || "").trim() });
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), clientName: person?.name || "", title: f.title.trim(), meetingLink: (f.meetingLink || "").trim(), fileUrl: (f.fileUrl || "").trim() });
   };
   return (
     <Modal title={f.id ? "Edit update" : "Post a client update"} onClose={onClose}
@@ -3295,10 +3389,20 @@ function PortalPostForm({ initial, onSave, onClose, portalClients }) {
             <select className="select" value={f.clientId} onChange={(e) => set("clientId", e.target.value)}>{portalClients.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.email})</option>)}</select>
           </Field>
           <div className="grid2">
-            <Field label="Heading"><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Homepage design ready" /></Field>
+            <Field label="Type"><select className="select" value={f.kind} onChange={(e) => set("kind", e.target.value)}><option value="update">Project update</option><option value="deliverable">Deliverable</option></select></Field>
             <Field label="Status"><select className="select" value={f.status} onChange={(e) => set("status", e.target.value)}>{["Not started", "In progress", "Review", "Completed", "On hold"].map((s) => <option key={s}>{s}</option>)}</select></Field>
           </div>
+          <Field label="Heading"><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder={f.kind === "deliverable" ? "e.g. Final logo pack" : "e.g. Homepage design ready"} /></Field>
           <Field label="Message"><textarea className="textarea" value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="What's the latest for this client?" /></Field>
+          {f.kind === "deliverable" && (
+            <Field label="Deliverable file or link" hint="Upload the file or paste a link — the client gets a Download button.">
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="input" value={f.fileUrl || ""} onChange={(e) => set("fileUrl", e.target.value)} placeholder="https://… or upload →" />
+                <button className="btn" type="button" onClick={() => fileRef.current?.click()} disabled={busy}>{busy ? <RefreshCw size={15} className="spin" /> : <Upload size={15} />}Upload</button>
+                <input ref={fileRef} type="file" onChange={pick} style={{ display: "none" }} />
+              </div>
+            </Field>
+          )}
           <Field label="Meeting link (optional)" hint="Paste a Google Meet / Zoom / Teams link — the client gets a Join button in their portal."><input className="input" value={f.meetingLink || ""} onChange={(e) => set("meetingLink", e.target.value)} placeholder="https://meet.google.com/…" /></Field>
         </>}
     </Modal>
@@ -3405,17 +3509,26 @@ function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me }) {
   );
 }
 
-function Quotations({ db, mutate, openModal, removeItem }) {
+function Quotations({ db, mutate, openModal, removeItem, me, currentUser, isAdmin }) {
   const [status, setStatus] = useState("All");
   const all = [...db.quotations].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const list = status === "All" ? all : all.filter((qt) => qt.status === status);
-  const setQuoteStatus = (qt, s) => mutate((d) => ({ ...d, quotations: d.quotations.map((x) => x.id === qt.id ? { ...x, status: s } : x) }), { action: `marked quote for ${qt.client} ${s}`, module: "Quotations" });
+  const setQuoteStatus = (qt, s) => {
+    const makeProject = s === "Accepted" && !db.projects.some((pr) => pr.quoteId === qt.id);
+    mutate((d) => {
+      const projects = makeProject
+        ? [...d.projects, { id: uid(), name: qt.title || qt.client, client: qt.client, type: "From quotation", stage: "In progress", priority: "Medium", cost: qt.total || 0, quoteId: qt.id, approvalStatus: isAdmin ? "approved" : "pending", createdById: me?.id, ownerName: currentUser, createdAt: Date.now() }]
+        : d.projects;
+      return { ...d, quotations: d.quotations.map((x) => x.id === qt.id ? { ...x, status: s } : x), projects };
+    }, { action: `marked quote for ${qt.client} ${s}${makeProject ? " — created a project" : ""}`, module: "Quotations" });
+  };
   const del = (qt) => removeItem("quotations", qt, { name: qt.client, audit: `deleted quotation for ${qt.client}` });
   const tone = (s) => s === "Accepted" ? "pos" : s === "Rejected" ? "neg" : s === "Sent" ? "pri" : "";
   return (
     <div className="content">
       <div className="page-head"><h3>Quotations</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "quotation" })}><Plus size={16} />New quotation</button></div>
       <div className="toolbar"><div className="seg">{["All", ...QUOTE_STATUS].map((s) => <button key={s} className={status === s ? "on" : ""} onClick={() => setStatus(s)}>{s}</button>)}</div></div>
+      {(() => { const decided = all.filter((q) => q.status === "Accepted" || q.status === "Rejected").length; const accepted = all.filter((q) => q.status === "Accepted").length; const rate = decided ? Math.round((accepted / decided) * 100) : 0; return <div className="hint-line" style={{ marginTop: -2, marginBottom: 10 }}>Conversion rate: <b style={{ color: "var(--ink)" }}>{rate}%</b> · {accepted} accepted of {decided} decided · {all.length} total</div>; })()}
       <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
         {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<FileText size={22} color="var(--muted)" />} title="No quotations" text="Build a quote with line items and a running total, then mark it Sent." action={<button className="btn primary" onClick={() => openModal({ type: "quotation" })}><Plus size={16} />New quotation</button>} /></div>
           : list.map((qt) => (
@@ -3431,6 +3544,7 @@ function Quotations({ db, mutate, openModal, removeItem }) {
               </div>
               <div style={{ display: "flex", gap: 6, marginTop: 2, alignItems: "center" }}>
                 <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={qt.status} onChange={(e) => setQuoteStatus(qt, e.target.value)}>{QUOTE_STATUS.map((s) => <option key={s}>{s}</option>)}</select>
+                {qt.pdfUrl && <a className="btn sm" href={qt.pdfUrl} target="_blank" rel="noreferrer"><FileText size={13} />PDF</a>}
                 <button className="btn sm" onClick={() => openModal({ type: "quotation", initial: qt })}><Pencil size={13} /></button>
                 <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete quotation?", body: `Delete the quote for ${qt.client}?`, note: "Moves to Recently deleted — restore within 60 days.", onConfirm: () => del(qt) })}><Trash2 size={13} /></button>
               </div>
@@ -3550,7 +3664,16 @@ function Announcements({ db, mutate, openModal, removeItem, isAdmin, me }) {
 function Documents({ db, mutate, openModal, removeItem, isAdmin, me }) {
   const [cat, setCat] = useState("All");
   const all = [...db.documents].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const list = cat === "All" ? all : all.filter((d) => d.category === cat);
+  const canSee = (d) => {
+    if (isAdmin || d.ownerId === me?.id) return true;
+    const aud = d.audience || "internal";
+    if (aud === "internal") return true;
+    if (aud === "members") return (d.userIds || []).includes(me?.id);
+    return false; // client-targeted documents appear in the client portal, not the internal list
+  };
+  const visibleDocs = all.filter(canSee);
+  const list = cat === "All" ? visibleDocs : visibleDocs.filter((d) => d.category === cat);
+  const audLabel = (d) => { const a = d.audience || "internal"; return a === "client" ? "Client" : a === "members" ? `${(d.userIds || []).length} member${(d.userIds || []).length === 1 ? "" : "s"}` : null; };
   const del = (d) => removeItem("documents", d, { name: d.title, audit: `deleted document "${d.title}"` });
   const canManage = (d) => isAdmin || d.ownerId === me?.id;
   return (
@@ -3564,7 +3687,7 @@ function Documents({ db, mutate, openModal, removeItem, isAdmin, me }) {
               <div className="empty" style={{ padding: 0 }}><div className="ic" style={{ width: 40, height: 40, margin: 0 }}><FileText size={18} color="var(--muted)" /></div></div>
               <div className="item-main">
                 <div className="item-title"><a href={d.url} target="_blank" rel="noreferrer" style={{ color: "var(--ink)", textDecoration: "none" }}>{d.title}</a></div>
-                <div className="item-meta"><span className="tag">{d.category}</span>{d.owner && <span>by {d.owner}</span>}{d.notes && <span>{d.notes}</span>}<span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div>
+                <div className="item-meta"><span className="tag">{d.category}</span>{audLabel(d) && <span className="badge accent" style={{ fontSize: 10.5 }}>{audLabel(d)}</span>}{d.owner && <span>by {d.owner}</span>}{d.notes && <span>{d.notes}</span>}<span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div>
               </div>
               <div className="row-actions" style={{ alignItems: "center" }}>
                 <a className="btn sm" href={d.url} target="_blank" rel="noreferrer"><ExternalLink size={13} />Open</a>
@@ -3777,10 +3900,37 @@ function PortalPosts({ db, mutate, openModal, removeItem, portalClients }) {
   );
 }
 
+function ResignForm({ existing, onSave, onClose }) {
+  const mine = (existing || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+  const [reason, setReason] = useState("");
+  const [lastDay, setLastDay] = useState("");
+  const pending = mine && mine.status === "Pending";
+  const approved = mine && mine.status === "Approved";
+  const submit = () => { if (!reason.trim()) return; onSave({ reason: reason.trim(), lastDay: lastDay || null }); };
+  return (
+    <Modal title="Resignation" onClose={onClose}
+      footer={(pending || approved)
+        ? <button className="btn" onClick={onClose}>Close</button>
+        : <><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={submit}><Check size={15} />Submit request</button></>}>
+      {approved ? <p className="hint-line">Your resignation has been approved. Thank you for your time with the team.</p>
+        : pending ? <p className="hint-line">Your resignation request was submitted{mine.lastDay ? ` with a proposed last working day of ${fmtDate(mine.lastDay)}` : ""} and is pending review by an admin.</p>
+        : <>
+          <p className="hint-line" style={{ marginBottom: 10 }}>This notifies your admins. They'll confirm your last working day and offboard your access.</p>
+          <Field label="Reason" required><textarea className="textarea" value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Briefly, why are you resigning?" /></Field>
+          <Field label="Proposed last working day"><input className="input" type="date" value={lastDay} onChange={(e) => setLastDay(e.target.value)} min={todayISO()} /></Field>
+        </>}
+    </Modal>
+  );
+}
+
 /* ── Client portal: a separate, read-only surface for external clients ──── */
-function ClientPortal({ db, profile, signOut, isDark }) {
+function ClientPortal({ db, profile, signOut, isDark, config }) {
   const myId = profile?.id;
+  const co = companyOf(config);
   const posts = [...db.portal_posts].filter((p) => p.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const updates = posts.filter((p) => (p.kind || "update") !== "deliverable");
+  const deliverables = posts.filter((p) => (p.kind || "update") === "deliverable");
+  const files = [...db.documents].filter((d) => d.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const quotes = [...db.quotations].filter((q) => q.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const invoices = [...db.invoices].filter((iv) => iv.clientId === myId).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const statusTone = (s) => s === "Completed" ? "pos" : s === "On hold" ? "neg" : s === "Review" ? "accent" : "pri";
@@ -3788,8 +3938,8 @@ function ClientPortal({ db, profile, signOut, isDark }) {
     <div className="allbee" data-theme={isDark ? "dark" : "light"} style={{ minHeight: "100vh" }}>
       <style>{CSS}</style>
       <header className="topbar" style={{ position: "sticky", top: 0 }}>
-        <img className="brand-logo" src={LOGO_ICON} alt="ALLBEE" style={{ height: 30 }} />
-        <div><h2 style={{ fontSize: 16 }}>Client portal</h2><div className="topbar-sub">ALLBEE Solutions</div></div>
+        <img className="brand-logo" src={co.logoUrl || LOGO_ICON} alt={co.name || "ALLBEE"} style={{ height: 30 }} />
+        <div><h2 style={{ fontSize: 16 }}>{co.name || "ALLBEE Solutions"}</h2><div className="topbar-sub">Client portal</div></div>
         <span className="spacer" style={{ flex: 1 }} />
         <div className="userchip" onClick={signOut} style={{ cursor: "pointer" }}><div className="avatar" style={{ background: avatarColor(profile?.name || "C") }}>{(profile?.name || "C")[0]}</div><span className="userchip-name">{profile?.name}</span><LogOut size={15} /></div>
       </header>
@@ -3798,8 +3948,8 @@ function ClientPortal({ db, profile, signOut, isDark }) {
 
         <div className="card stat" style={{ marginBottom: 16 }}>
           <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Your project updates</div>
-          {posts.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No updates yet. We'll post progress here as we go.</p>
-            : <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>{posts.map((p) => (
+          {updates.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No updates yet. We'll post progress here as we go.</p>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>{updates.map((p) => (
               <div key={p.id} style={{ borderLeft: "3px solid var(--primary)", paddingLeft: 14 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 700 }}>{p.title}</span><span className={"badge " + statusTone(p.status)}>{p.status}</span></div>
                 {p.body && <div style={{ marginTop: 5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{p.body}</div>}
@@ -3815,7 +3965,7 @@ function ClientPortal({ db, profile, signOut, isDark }) {
             : <div style={{ overflowX: "auto", marginTop: 10 }}><table className="tbl">
               <thead><tr><th>Quotation</th><th>Status</th><th className="num-cell">Total</th></tr></thead>
               <tbody>{quotes.map((q) => (
-                <tr key={q.id}><td><div style={{ fontWeight: 600 }}>{q.title || "Quotation"}</div><div className="hint-line" style={{ fontSize: 11 }}>{(q.items || []).length} item{(q.items || []).length === 1 ? "" : "s"}</div></td>
+                <tr key={q.id}><td><div style={{ fontWeight: 600 }}>{q.title || "Quotation"}</div><div className="hint-line" style={{ fontSize: 11 }}>{(q.items || []).length} item{(q.items || []).length === 1 ? "" : "s"}{q.pdfUrl && <> · <a href={q.pdfUrl} target="_blank" rel="noreferrer">PDF</a></>}</div></td>
                   <td><span className={"badge " + (q.status === "Accepted" ? "pos" : q.status === "Rejected" ? "neg" : "pri")}>{q.status}</span></td>
                   <td className="num-cell mono">{money(q.total)}</td></tr>
               ))}</tbody>
@@ -3836,6 +3986,37 @@ function ClientPortal({ db, profile, signOut, isDark }) {
               ))}</tbody>
             </table></div>}
         </div>
+
+        <div className="card stat" style={{ marginTop: 16 }}>
+          <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Deliverables</div>
+          {deliverables.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No deliverables shared yet.</p>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12 }}>{deliverables.map((p) => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 180 }}><div style={{ fontWeight: 700 }}>{p.title}</div>{p.body && <div className="hint-line" style={{ fontSize: 12.5, marginTop: 2 }}>{p.body}</div>}</div>
+                <span className={"badge " + statusTone(p.status)}>{p.status}</span>
+                {p.fileUrl && <a className="btn sm primary" href={p.fileUrl} target="_blank" rel="noreferrer"><Download size={13} />Download</a>}
+              </div>
+            ))}</div>}
+        </div>
+
+        <div className="card stat" style={{ marginTop: 16 }}>
+          <div className="lbl" style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", marginBottom: 4 }}>Files</div>
+          {files.length === 0 ? <p className="hint-line" style={{ margin: "8px 0 0" }}>No files shared yet.</p>
+            : <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>{files.map((d) => (
+              <div key={d.id} className="item-row" style={{ padding: "10px 0" }}>
+                <div className="item-main"><div className="item-title" style={{ fontSize: 14 }}>{d.title}</div><div className="item-meta"><span className="tag">{d.category}</span><span>{fmtDate(new Date(d.createdAt).toISOString().slice(0, 10))}</span></div></div>
+                <a className="btn sm" href={d.url} target="_blank" rel="noreferrer"><ExternalLink size={13} />Open</a>
+              </div>
+            ))}</div>}
+        </div>
+
+        {(co.name || co.address || co.email || co.phone || co.website) && (
+          <div className="hint-line" style={{ marginTop: 20, textAlign: "center", lineHeight: 1.6 }}>
+            {co.name && <div style={{ fontWeight: 700, color: "var(--ink)" }}>{co.name}</div>}
+            {co.address && <div>{co.address}</div>}
+            {[co.phone, co.email, co.website].filter(Boolean).length > 0 && <div>{[co.phone, co.email, co.website].filter(Boolean).join("  ·  ")}</div>}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -4220,6 +4401,10 @@ export default function App() {
     await saveConfig({ company: JSON.stringify(obj || {}) });
     if (session) setConfig(await fetchConfig());
   }, [session]);
+  const resolveResign = (r, decision) => {
+    mutate((d) => ({ ...d, resignations: (d.resignations || []).map((x) => x.id === r.id ? { ...x, status: decision, resolvedAt: Date.now() } : x) }), { action: `${decision === "Approved" ? "approved" : "declined"} ${r.userName}'s resignation request`, module: "Team" });
+    if (decision === "Approved") changeProfile(r.userId, { status: "resigned", active: false });
+  };
 
   const signOut = async () => { setUserMenu(false); await supabase.auth.signOut(); };
 
@@ -4334,7 +4519,7 @@ export default function App() {
   // portal clients get their own surface and skip the internal profile/T&C gates
   if (role === "client") {
     if (loading || !db) return <Loading note="Loading your portal…" />;
-    return <ClientPortal db={db} profile={profile} signOut={signOut} isDark={isDark} />;
+    return <ClientPortal db={db} profile={profile} signOut={signOut} isDark={isDark} config={config} />;
   }
   // first login: require the core profile details before anything else
   if (profile && (!profile.mobile || !profile.dob))
@@ -4376,7 +4561,7 @@ export default function App() {
       case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} openModal={openModal} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} removeItem={removeItem} openModal={openModal} />;
-      case "team": return <Team team={team} me={me} changeProfile={changeProfile} />;
+      case "team": return <Team team={team} me={me} changeProfile={changeProfile} db={db} resolveResign={resolveResign} />;
       case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} locks={locks} lockPeriod={lockPeriod} unlockPeriod={unlockPeriod} isSuper={isSuper} currentUser={currentUser} />;
       case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} isSuper={isSuper} currentUser={currentUser} />;
       case "progress": return <Progress db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} />;
@@ -4386,7 +4571,7 @@ export default function App() {
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} me={me} />;
       case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
-      case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} />;
+      case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} currentUser={currentUser} isAdmin={isAdmin} />;
       case "invoices": return <Invoices db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "portal-posts": return <PortalPosts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "planned": return <Planned db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} openIncome={openIncome} canFinance={canFinance} />;
@@ -4497,6 +4682,7 @@ export default function App() {
                       <div className="avatar" style={{ background: avatarColor(currentUser), width: 22, height: 22, fontSize: 10 }}>{currentUser[0]}</div>
                       <div><div style={{ fontWeight: 700, fontSize: 13 }}>{currentUser}</div><div className="hint-line" style={{ fontSize: 11 }}>{session?.user?.email}</div></div>
                     </div>
+                    {role !== "superadmin" && <button onClick={() => { setUserMenu(false); openModal({ type: "resign" }); }}><XCircle size={15} />Request resignation</button>}
                     <button onClick={signOut}><LogOut size={15} />Sign out</button>
                   </div>
                 )}
@@ -4522,12 +4708,13 @@ export default function App() {
         {modal?.type === "invoice" && <InvoiceForm initial={modal.initial} clients={db.clients} portalClients={portalClients} onSave={(x) => saveOwned("invoices", x)} onClose={() => setModal(null)} />}
         {modal?.type === "planned" && <PlannedForm initial={modal.initial} onSave={(x) => saveOwned("planned", x)} onClose={() => setModal(null)} />}
         {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(x) => saveOwned("vault", x)} onClose={() => setModal(null)} />}
-        {modal?.type === "document" && <DocForm initial={modal.initial} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "document" && <DocForm initial={modal.initial} team={team} portalClients={portalClients} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
         {modal?.type === "knowledge" && <KbForm initial={modal.initial} onSave={(x) => saveOwned("knowledge", x)} onClose={() => setModal(null)} />}
         {modal?.type === "reward" && <RewardForm initial={modal.initial} team={team} onSave={(x) => saveOwned("rewards", x)} onClose={() => setModal(null)} />}
         {modal?.type === "notification" && <NotificationForm initial={modal.initial} team={team} onSave={(x) => saveOwned("notifications", x)} onClose={() => setModal(null)} />}
         {modal?.type === "announcement" && <AnnouncementForm initial={modal.initial} onSave={(x) => saveOwned("announcements", x)} onClose={() => setModal(null)} />}
         {modal?.type === "portalPost" && <PortalPostForm initial={modal.initial} portalClients={portalClients} onSave={(x) => saveOwned("portal_posts", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "resign" && <ResignForm existing={(db.resignations || []).filter((r) => r.userId === me.id)} onSave={(r) => { mutate((d) => ({ ...d, resignations: [...(d.resignations || []), { ...r, id: uid(), userId: me.id, userName: currentUser, status: "Pending", createdAt: Date.now() }] }), { action: "submitted a resignation request", module: "Team" }); setModal(null); }} onClose={() => setModal(null)} />}
         {modal?.type === "confirm" && <Confirm title={modal.title} body={modal.body} confirmLabel={modal.confirmLabel} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "deleteConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Delete"} icon={<Trash2 size={15} />} danger onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
         {modal?.type === "restoreConfirm" && <TypedConfirm title={modal.title} body={modal.body} note={modal.note} actionLabel={modal.actionLabel || "Restore"} icon={<RotateCcw size={15} />} danger={false} onConfirm={modal.onConfirm} onClose={() => setModal(null)} />}
