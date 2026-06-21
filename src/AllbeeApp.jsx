@@ -299,7 +299,10 @@ async function ensureProfile(user) {
   const { data } = await supabase.from("profiles").select("id").eq("id", user.id).maybeSingle();
   if (data) return;
   const name = user.user_metadata?.name || (user.email ? user.email.split("@")[0] : "Member");
-  await supabase.from("profiles").upsert({ id: user.id, name, email: user.email, role: "staff" }, { onConflict: "id", ignoreDuplicates: true });
+  // approved:false means a brand-new (or previously-removed) account lands on
+  // "Awaiting approval" with no access until an admin lets them in — so deleting
+  // someone is durable even if their auth login still exists.
+  await supabase.from("profiles").upsert({ id: user.id, name, email: user.email, role: "staff", approved: false }, { onConflict: "id", ignoreDuplicates: true });
 }
 async function updateProfile(id, patch) {
   const { error } = await supabase.from("profiles").update(patch).eq("id", id);
@@ -4705,8 +4708,25 @@ function ManageUserModal({ person, onClose }) {
   // reused. Partners can't be deleted. Goes through the admin-users edge function.
   const removeUser = async () => {
     if (person.role === "superadmin") { setErr("Partners can't be deleted."); return; }
-    if (!window.confirm(`Permanently delete ${person.name}? This removes their login and profile. You can re-create the account with the same email afterwards.`)) return;
-    if (await call({ action: "delete", userId: person.id })) onClose();
+    if (!window.confirm(`Permanently delete ${person.name}? They're removed from the team and can't sign back in. You can re-create them afterwards.`)) return;
+    setBusy(true); setMsg(""); setErr("");
+    // 1. Remove the profile row directly. This works with no edge function and
+    //    takes them out of the team immediately (and frees their username).
+    try {
+      const { error } = await supabase.from("profiles").delete().eq("id", person.id);
+      if (error) throw error;
+    } catch (e) {
+      setBusy(false);
+      setErr(/(permission|denied|policy|row-level)/i.test((e && e.message) || "")
+        ? "The database is blocking the delete. Run allbee-delete-user.sql once, then try again."
+        : ("Couldn't remove them: " + ((e && e.message) || "unknown error")));
+      return;
+    }
+    // 2. Best-effort: also delete their login via the edge function so the email
+    //    frees up too. If it isn't deployed, that's fine — they're already gone.
+    try { await supabase.functions.invoke("admin-users", { body: { action: "delete", userId: person.id } }); } catch { /* function not deployed — profile already removed */ }
+    setBusy(false);
+    onClose();
   };
   return (
     <Modal title={"Manage " + person.name} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
