@@ -35,6 +35,7 @@ const QUOTE_STATUS = ["Draft", "Sent", "Accepted", "Rejected"];
 const DOC_CATEGORIES = ["Contract", "Invoice", "Design", "Brand", "Report", "Other"];
 const KB_CATEGORIES = ["Policy", "How-to", "FAQ", "Onboarding", "Tools", "Other"];
 const PROMPT_CATEGORIES = ["General", "Sales", "Marketing", "Support", "Development", "AI / ChatGPT"];
+const SHEET_CATEGORIES = ["General", "Finance", "Reports", "Trackers", "Clients", "HR", "Marketing"];
 const EXPENSE_RECURRENCE = ["One-time", "Monthly", "Quarterly", "Yearly"];
 const REWARD_KINDS = ["Star performer", "On-time hero", "Team player", "Goal smashed", "Bonus"];
 const VAULT_CATEGORIES = ["Social", "Website", "Hosting", "Email", "Domain", "Banking", "Tools", "Other"];
@@ -79,6 +80,7 @@ const MODULE_LABEL = {
   rewards: "Rewards", vault: "Passwords", portal_posts: "Client updates",
   notifications: "Notifications", invoices: "Invoices",
   prompts: "Prompts",
+  sheets: "Sheets",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -94,7 +96,7 @@ const STATUS_OPTIONS = ["active", "on_leave", "suspended", "resigned", "terminat
 // statuses that revoke sign-in (the row's `active` flag is set from this)
 const STATUS_ACTIVE = { active: true, on_leave: true, suspended: false, resigned: false, terminated: false };
 // business modules an admin can grant to an individual staff member, one by one
-const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"]];
+const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["quotations", "Quotations"], ["invoices", "Invoices"], ["portal-posts", "Client updates"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"], ["sheets", "Sheets"]];
 // Who must accept Terms & Conditions before using the app. Partners (superadmin)
 // author the agreements, so they're exempt; everyone else signs.
 const TNC_ROLES = ["admin", "accountant", "staff", "intern"];
@@ -188,7 +190,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts", "sheets"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -327,7 +329,7 @@ const emptyDB = () => ({
   leads: [], clients: [], quotations: [], planned: [],
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
-  notifications: [], invoices: [], resignations: [], prompts: [],
+  notifications: [], invoices: [], resignations: [], prompts: [], sheets: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -3126,9 +3128,9 @@ const NAV = [
   ["chat", "Team chat", Send, "collab"],
   ["leads", "Leads", UserPlus, "perm:leads"],
   ["clients", "Clients", Building2, "perm:clients"],
-  ["quotations", "Quotations", FileText, "perm:clients"],
-  ["invoices", "Invoices", Banknote, "perm:clients"],
-  ["portal-posts", "Client updates", ExternalLink, "perm:clients"],
+  ["quotations", "Quotations", FileText, "perm:quotations"],
+  ["invoices", "Invoices", Banknote, "perm:invoices"],
+  ["portal-posts", "Client updates", ExternalLink, "perm:portal-posts"],
   ["projects", "Projects", FolderKanban, "perm:projects"],
   ["courses", "Courses", GraduationCap, "perm:courses"],
   ["marketing", "Marketing", Megaphone, "perm:marketing"],
@@ -3142,6 +3144,7 @@ const NAV = [
   ["documents", "Documents", Paperclip, "collab"],
   ["knowledge", "Knowledge base", BookOpen, "collab"],
   ["prompts", "Prompts", Sparkles, "collab"],
+  ["sheets", "Sheets", Sheet, "perm:sheets"],
   ["terms", "Terms & conditions", BadgeCheck, "everyone"],
   ["performance", "Performance", TrendingUp, "insight"],
   ["rewards", "Rewards", Award, "collab"],
@@ -3650,6 +3653,70 @@ function Prompts({ db, openModal, removeItem }) {
   );
 }
 
+// Google Sheets (and any spreadsheet) link library — one tidy place for all the
+// team's workbook links. Backed by the `sheets` table (run allbee-sheets.sql).
+function SheetForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", url: "", category: "General", note: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Add a name."); return; }
+    const url = f.url.trim();
+    if (!/^https?:\/\//i.test(url)) { setErr("Add a valid link starting with http(s)://"); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim(), url });
+  };
+  return (
+    <Modal title={f.id ? "Edit sheet link" : "Add a sheet link"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Name" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. 2026 Expense tracker" /></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={SHEET_CATEGORIES} placeholder="Custom category…" /></Field>
+      </div>
+      <Field label="Link" required hint="Paste the Google Sheets (or any spreadsheet) URL."><input className="input" value={f.url} onChange={(e) => set("url", e.target.value)} placeholder="https://docs.google.com/spreadsheets/…" /></Field>
+      <Field label="Note"><textarea className="textarea" value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="What's in this sheet? (optional)" /></Field>
+    </Modal>
+  );
+}
+
+function Sheets({ db, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("all");
+  const [copiedId, setCopiedId] = useState(null);
+  const all = [...(db.sheets || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const cats = Array.from(new Set(all.map((p) => p.category).filter(Boolean)));
+  const list = all.filter((p) => (cat === "all" || p.category === cat) && (!q.trim() || (p.title + " " + (p.note || "") + " " + (p.category || "")).toLowerCase().includes(q.trim().toLowerCase())));
+  const copy = async (p) => { try { await navigator.clipboard.writeText(p.url || ""); setCopiedId(p.id); setTimeout(() => setCopiedId(null), 1500); } catch { alert("Couldn't copy the link."); } };
+  const del = (p) => removeItem("sheets", p, { name: p.title, audit: `deleted sheet link "${p.title}"` });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Sheets</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "sheet" })}><Plus size={16} />Add link</button></div>
+      <p className="hint-line" style={{ marginTop: -8, marginBottom: 14 }}>Keep all your Google Sheets links in one place — trackers, reports, old workbooks. Open or copy any of them in one tap.</p>
+      <div className="filterbar">
+        <Field label="Search"><input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search sheets…" /></Field>
+        {cats.length > 0 && <Field label="Category"><select className="select" value={cat} onChange={(e) => setCat(e.target.value)}><option value="all">All categories</option>{cats.map((c) => <option key={c}>{c}</option>)}</select></Field>}
+      </div>
+      {list.length === 0 ? <div className="card"><Empty icon={<Sheet size={22} color="var(--muted)" />} title="No sheet links yet" text="Paste your Google Sheets links here so the whole team can find them." action={<button className="btn primary" onClick={() => openModal({ type: "sheet" })}><Plus size={16} />Add link</button>} /></div>
+        : <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))" }}>{list.map((p) => (
+          <div key={p.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Sheet size={16} color="var(--pos)" style={{ flex: "none" }} />
+              <span style={{ fontWeight: 700, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title}</span>
+              {p.category && <span className="tag">{p.category}</span>}
+            </div>
+            {p.note && <div className="hint-line" style={{ fontSize: 13, lineHeight: 1.5 }}>{p.note}</div>}
+            <div className="hint-line" style={{ fontSize: 12, color: "var(--primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.url}</div>
+            <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+              <button className="btn sm primary" onClick={() => window.open(p.url, "_blank", "noopener")}><ExternalLink size={13} />Open</button>
+              <button className="btn sm" onClick={() => copy(p)}>{copiedId === p.id ? <><Check size={13} />Copied</> : <><Copy size={13} />Copy</>}</button>
+              <button className="btn sm" onClick={() => openModal({ type: "sheet", initial: p })}><Pencil size={13} /></button>
+              <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete sheet link?", body: `Delete "${p.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>
+            </div>
+          </div>
+        ))}</div>}
+    </div>
+  );
+}
+
 // A <select> whose last entry is "Other…", which reveals a text box so you can
 // type a custom value. Drop-in for any preset dropdown that should also accept
 // free text. `value` is the current string; `options` are the presets.
@@ -4079,7 +4146,7 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
   );
 }
 
-function Chat({ db, mutate, me, team, onRefresh }) {
+function Chat({ db, mutate, me, team, onRefresh, isAdmin }) {
   const [text, setText] = useState("");
   const [editId, setEditId] = useState(null);
   const [editText, setEditText] = useState("");
@@ -4120,7 +4187,8 @@ function Chat({ db, mutate, me, team, onRefresh }) {
   const startEdit = (m) => { setEditId(m.id); setEditText(m.text); };
   const saveEdit = (m) => { const t = editText.trim(); if (!t) { setEditId(null); return; } mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, text: t, editedAt: Date.now() } : x) }), null); setEditId(null); setEditText(""); };
   // Delete = tombstone (keeps message order, works under existing chat RLS).
-  const del = (m) => { if (!window.confirm("Delete this message for everyone?")) return; mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, deleted: true, text: "", attachment: null } : x) }), null); };
+  // Admins can delete anyone's; everyone else only their own.
+  const del = (m) => { const whose = m.userId === me.id ? "your message" : `${m.userName}'s message`; if (!window.confirm(`Delete ${whose} for everyone?`)) return; mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, deleted: true, text: "", attachment: null, deletedBy: me.name } : x) }), null); };
   // Names of teammates who've seen one of my messages.
   const seenNames = (m) => (m.seenBy || []).filter((u) => u !== me.id).map((u) => ((team || []).find((p) => p.id === u)?.name) || "Someone").filter(Boolean);
   return (
@@ -4146,7 +4214,7 @@ function Chat({ db, mutate, me, team, onRefresh }) {
                       ? <a href={m.attachment.url} target="_blank" rel="noreferrer"><img src={m.attachment.url} alt={m.attachment.name || ""} style={{ display: "block", maxWidth: 220, maxHeight: 220, borderRadius: 8, marginTop: m.text ? 8 : 0 }} /></a>
                       : <a href={m.attachment.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: m.text ? 8 : 0, color: mine ? "#fff" : "var(--primary)", textDecoration: "underline" }}><Paperclip size={13} />{m.attachment.name || "Attachment"}</a>)}</div>
                   )}
-                  {!m.deleted && <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && seenNames(m).length > 0 ? " · Seen by " + (seenNames(m).length <= 2 ? seenNames(m).join(", ") : `${seenNames(m).slice(0, 2).join(", ")} +${seenNames(m).length - 2}`) : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}{mine && editId !== m.id && <button onClick={() => del(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--neg)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Delete</button>}</div>}
+                  {!m.deleted && <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && seenNames(m).length > 0 ? " · Seen by " + (seenNames(m).length <= 2 ? seenNames(m).join(", ") : `${seenNames(m).slice(0, 2).join(", ")} +${seenNames(m).length - 2}`) : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}{mine && editId !== m.id && <button onClick={() => del(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--neg)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Delete</button>}{!mine && isAdmin && editId !== m.id && <button onClick={() => del(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--neg)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Delete</button>}</div>}
                 </div>
               </div>
             );
@@ -4609,7 +4677,12 @@ function ManageUserModal({ person, onClose }) {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const call = async (body) => { setBusy(true); setMsg(""); setErr(""); try { const { data, error } = await supabase.functions.invoke("admin-users", { body }); if (error) throw error; if (data && data.error) throw new Error(data.error); return true; } catch (e) { setErr((e && e.message) || "Action failed. Is the admin-users function deployed?"); return false; } finally { setBusy(false); } };
-  const saveDes = async () => { if (await call({ action: "set_designation", userId: person.id, designation })) setMsg("Job title updated."); };
+  const saveDes = async () => {
+    setBusy(true); setMsg(""); setErr("");
+    try { const { error } = await supabase.from("profiles").update({ designation: designation.trim() || null }).eq("id", person.id); if (error) throw error; setMsg("Job title updated."); }
+    catch (e) { setErr((e && e.message) || "Couldn't update the job title."); }
+    finally { setBusy(false); }
+  };
   const resetPw = async () => { if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; } if (await call({ action: "reset_password", userId: person.id, password: pw })) { setMsg("Password reset."); setPw(""); } };
   // Username writes straight to the profile (no edge function needed).
   const saveUsername = async () => {
@@ -5030,9 +5103,10 @@ export default function App() {
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "prompts": return <Prompts db={db} openModal={openModal} removeItem={removeItem} />;
+      case "sheets": return <Sheets db={db} openModal={openModal} removeItem={removeItem} />;
       case "terms": return <TermsPage config={config} profile={profile} role={role} isAdmin={isAdmin} go={go} />;
       case "profile": return <MyProfile profile={profile} role={role} saveMyProfile={saveMyProfile} sessionEmail={session?.user?.email} />;
-      case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} onRefresh={reload} />;
+      case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} onRefresh={reload} isAdmin={isAdmin} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
@@ -5168,6 +5242,7 @@ export default function App() {
         {modal?.type === "document" && <DocForm initial={modal.initial} team={team} portalClients={portalClients} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
         {modal?.type === "knowledge" && <KbForm initial={modal.initial} onSave={(x) => saveOwned("knowledge", x)} onClose={() => setModal(null)} />}
         {modal?.type === "prompt" && <PromptForm initial={modal.initial} onSave={(x) => saveOwned("prompts", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "sheet" && <SheetForm initial={modal.initial} onSave={(x) => saveOwned("sheets", x)} onClose={() => setModal(null)} />}
         {modal?.type === "reward" && <RewardForm initial={modal.initial} team={team} onSave={(x) => saveOwned("rewards", x)} onClose={() => setModal(null)} />}
         {modal?.type === "notification" && <NotificationForm initial={modal.initial} team={team} onSave={(x) => saveOwned("notifications", x)} onClose={() => setModal(null)} />}
         {modal?.type === "announcement" && <AnnouncementForm initial={modal.initial} onSave={(x) => saveOwned("announcements", x)} onClose={() => setModal(null)} />}
