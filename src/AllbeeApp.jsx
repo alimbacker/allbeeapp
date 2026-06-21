@@ -4166,7 +4166,7 @@ function Chat({ db, mutate, me, team, onRefresh, isAdmin }) {
   const endRef = useRef(null);
   const fileRef = useRef(null);
   const [busy, setBusy] = useState(false);
-  const list = [...db.chat].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  const list = [...db.chat].filter((m) => !m.deleted).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
   // Realtime can lag on mobile/background tabs — gently re-pull while the chat is
   // open so new messages show up without a manual refresh.
