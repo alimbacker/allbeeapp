@@ -7,7 +7,7 @@ import {
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
   ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
-  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote, User,
+  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote, User, Sparkles,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -34,6 +34,7 @@ const LEAD_SOURCES = ["Referral", "Instagram", "Facebook", "Website", "Walk-in",
 const QUOTE_STATUS = ["Draft", "Sent", "Accepted", "Rejected"];
 const DOC_CATEGORIES = ["Contract", "Invoice", "Design", "Brand", "Report", "Other"];
 const KB_CATEGORIES = ["Policy", "How-to", "FAQ", "Onboarding", "Tools", "Other"];
+const PROMPT_CATEGORIES = ["General", "Sales", "Marketing", "Support", "Development", "AI / ChatGPT"];
 const EXPENSE_RECURRENCE = ["One-time", "Monthly", "Quarterly", "Yearly"];
 const REWARD_KINDS = ["Star performer", "On-time hero", "Team player", "Goal smashed", "Bonus"];
 const VAULT_CATEGORIES = ["Social", "Website", "Hosting", "Email", "Domain", "Banking", "Tools", "Other"];
@@ -77,6 +78,7 @@ const MODULE_LABEL = {
   announcements: "Announcements", documents: "Documents", knowledge: "Knowledge base",
   rewards: "Rewards", vault: "Passwords", portal_posts: "Client updates",
   notifications: "Notifications", invoices: "Invoices",
+  prompts: "Prompts",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -186,7 +188,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -325,7 +327,7 @@ const emptyDB = () => ({
   leads: [], clients: [], quotations: [], planned: [],
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
-  notifications: [], invoices: [], resignations: [],
+  notifications: [], invoices: [], resignations: [], prompts: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -459,7 +461,7 @@ const CSS = `
   --pos:#15924D; --pos-soft:#E5F4EB; --neg:#D23B3B; --neg-soft:#FBEAEA;
   --haji:#0E9F8E; --alim:#7C5CFC; --shadow:0 1px 2px rgba(16,22,32,.06),0 8px 24px rgba(16,22,32,.06);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  color:var(--ink); background:var(--bg); min-height:100vh; -webkit-font-smoothing:antialiased;
+  color:var(--ink); background:var(--bg); min-height:100vh; -webkit-font-smoothing:antialiased; overflow-x:hidden;
 }
 .allbee[data-theme="dark"] {
   --bg:#0D1117; --surface:#161B22; --surface-2:#1C232C; --ink:#E7EBF1; --muted:#8B95A5;
@@ -657,6 +659,19 @@ table.tbl tr:hover td { background:var(--surface-2); }
   .content { padding:16px; }
   .grid2 { grid-template-columns:1fr; }
   .company-pill .lbl { display:none; }
+  .topbar { padding:12px 14px; gap:10px; }
+  .topbar h2 { font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .topbar > div:nth-child(2) { min-width:0; }
+  .company-pill { padding:6px 10px; }
+  .company-pill .val { font-size:14px; }
+}
+@media (max-width:560px) {
+  .topbar { gap:8px; padding:11px 12px; }
+  .topbar-sub { display:none; }
+  .userchip-name { display:none; }
+  .userchip .role-badge { display:none; }
+  .userchip { padding:4px; gap:0; }
+  .cards-grid { grid-template-columns:1fr !important; }
 }
 
 /* ── Phase 2 additions ─────────────────────────────────────────────────── */
@@ -1296,6 +1311,30 @@ async function exportRowsToExcel(filename, sheetName, columns, rows) {
     XLSX.utils.book_append_sheet(wb, ws, (sheetName || "Sheet1").slice(0, 31));
     XLSX.writeFile(wb, filename);
   } catch (e) { console.error(e); alert("Couldn't build the Excel file — the export library failed to load. Check your internet connection and try again."); }
+}
+// Full backup → one worksheet per table, every row flattened. Opens directly in
+// Excel or Google Sheets (File → Import) and doubles as a keep-safe snapshot.
+async function exportFullBackupXLSX(db) {
+  try {
+    const mod = await import(/* @vite-ignore */ EXPORT_CDN.xlsx);
+    const XLSX = mod.utils ? mod : (mod.default || mod);
+    const wb = XLSX.utils.book_new();
+    const used = new Set();
+    let any = false;
+    for (const t of TABLES) {
+      const rows = db[t] || [];
+      if (!rows.length) continue;
+      const keys = Array.from(rows.reduce((s, r) => { Object.keys(r || {}).forEach((k) => s.add(k)); return s; }, new Set()));
+      const aoa = [keys, ...rows.map((r) => keys.map((k) => { const v = r ? r[k] : undefined; return v == null ? "" : (typeof v === "object" ? JSON.stringify(v) : v); }))];
+      let name = (MODULE_LABEL[t] || t).slice(0, 31), base = name, i = 2;
+      while (used.has(name.toLowerCase())) { name = (base.slice(0, 28) + " " + i).slice(0, 31); i++; }
+      used.add(name.toLowerCase());
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
+      any = true;
+    }
+    if (!any) { alert("There's no data to back up yet."); return; }
+    XLSX.writeFile(wb, `allbee-backup-${todayISO()}.xlsx`);
+  } catch (e) { console.error(e); alert("Couldn't build the Excel backup — the export library failed to load. Check your connection and try again."); }
 }
 async function exportRowsToPDF(filename, title, subtitle, columns, rows) {
   try {
@@ -2267,11 +2306,12 @@ function Settings({ db, mutate, replaceDB, syncError, currentUser, role, teamCou
       <div className="card stat" style={{ marginBottom: 14 }}>
         <div className="lbl" style={{ marginBottom: 12, fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>Backup & restore</div>
         <p className="hint-line" style={{ lineHeight: 1.55, marginBottom: 14 }}>
-          Export a full copy of your database as a JSON file you can keep or upload to Google Drive yourself. Importing replaces the current data.
+          Export a full copy of your database. <b>Excel backup</b> writes one sheet per module — open it in Excel or import it into Google Sheets (File → Import) for a spreadsheet backup. <b>JSON backup</b> is for re-importing here later. Importing JSON replaces the current data.
         </p>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button className="btn primary" onClick={exportJSON}><Download size={16} />Export backup</button>
-          <button className="btn" onClick={() => fileRef.current?.click()}><Upload size={16} />Import backup</button>
+          <button className="btn primary" onClick={() => exportFullBackupXLSX(db)}><Sheet size={16} />Excel backup (all data)</button>
+          <button className="btn" onClick={exportJSON}><Download size={16} />JSON backup</button>
+          <button className="btn" onClick={() => fileRef.current?.click()}><Upload size={16} />Import JSON</button>
           <input ref={fileRef} type="file" accept="application/json" onChange={importJSON} style={{ display: "none" }} />
         </div>
       </div>
@@ -2890,7 +2930,18 @@ function MyProfile({ profile, role, saveMyProfile, sessionEmail }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState(false);
-  // re-sync if the profile changes elsewhere (e.g. an admin edits designation)
+  const photoRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  // Upload a display picture to storage, then persist just the photo (so it
+  // saves immediately even if the rest of the form isn't filled yet).
+  const pickPhoto = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    if (!(file.type || "").startsWith("image/")) { setErr("Please choose an image file."); if (e.target) e.target.value = ""; return; }
+    setUploading(true); setErr(""); setDone(false);
+    try { const up = await uploadAttachment(file); setPhoto(up.url); await saveMyProfile({ photo_url: up.url }); setDone(true); }
+    catch (er) { setErr(er.message || "Couldn't upload that image."); }
+    finally { setUploading(false); if (e.target) e.target.value = ""; }
+  };
   useEffect(() => {
     setName(profile?.name || ""); setMobile(profile?.mobile || ""); setDob(profile?.dob || "");
     setPhoto(profile?.photo_url || ""); setUsername(profile?.username || "");
@@ -2911,7 +2962,7 @@ function MyProfile({ profile, role, saveMyProfile, sessionEmail }) {
     <div className="content">
       <div className="page-head"><h3>My profile</h3></div>
       <div className="card stat" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-        <div className="avatar" style={{ background: avatarColor(name || "?"), width: 48, height: 48, fontSize: 19 }}>{(name || "?")[0]}</div>
+        <div className="avatar" style={{ background: avatarColor(name || "?"), width: 48, height: 48, fontSize: 19, overflow: "hidden", padding: 0 }}>{photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : (name || "?")[0]}</div>
         <div style={{ flex: 1, minWidth: 160 }}>
           <div style={{ fontWeight: 700, fontSize: 16 }}>{name || "Your name"}</div>
           <div className="hint-line" style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4, alignItems: "center" }}>
@@ -2933,7 +2984,14 @@ function MyProfile({ profile, role, saveMyProfile, sessionEmail }) {
         </div>
         <div className="grid2">
           <Field label="Username" hint="Optional — sign in with this instead of email."><input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="e.g. priya" /></Field>
-          <Field label="Profile photo URL" hint="Optional — paste an image link."><input className="input" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="https://…" /></Field>
+          <Field label="Profile photo" hint="Upload an image (max 10 MB) — saves right away.">
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              <div className="avatar" style={{ background: avatarColor(name || "?"), width: 40, height: 40, fontSize: 16, overflow: "hidden", padding: 0, flex: "none" }}>{photo ? <img src={photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : (name || "?")[0]}</div>
+              <button className="btn sm" type="button" onClick={() => photoRef.current?.click()} disabled={uploading}>{uploading ? <RefreshCw size={14} className="spin" /> : <Upload size={14} />}{photo ? "Change" : "Upload photo"}</button>
+              {photo && <button className="btn sm" type="button" onClick={() => { setPhoto(""); saveMyProfile({ photo_url: null }); }}>Remove</button>}
+              <input ref={photoRef} type="file" accept="image/*" onChange={pickPhoto} style={{ display: "none" }} />
+            </div>
+          </Field>
         </div>
         {err && <div className="auth-msg err" style={{ marginTop: 4 }}><AlertTriangle size={14} /> {err}</div>}
         {done && !err && <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginTop: 8, borderColor: "var(--pos)" }}><BadgeCheck size={15} color="var(--pos)" /> Profile saved.</div>}
@@ -3083,6 +3141,7 @@ const NAV = [
   ["announcements", "Announcements", MegaphoneIcon, "collab"],
   ["documents", "Documents", Paperclip, "collab"],
   ["knowledge", "Knowledge base", BookOpen, "collab"],
+  ["prompts", "Prompts", Sparkles, "collab"],
   ["terms", "Terms & conditions", BadgeCheck, "everyone"],
   ["performance", "Performance", TrendingUp, "insight"],
   ["rewards", "Rewards", Award, "collab"],
@@ -3284,7 +3343,7 @@ function LeadForm({ initial, onSave, onClose }) {
         <Field label="Email"><input className="input" value={f.email} onChange={(e) => set("email", e.target.value)} placeholder="name@email" /></Field>
       </div>
       <div className="grid2">
-        <Field label="Source"><select className="select" value={f.source} onChange={(e) => set("source", e.target.value)}>{LEAD_SOURCES.map((s) => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="Source"><SelectOther value={f.source} onChange={(v) => set("source", v)} options={LEAD_SOURCES.filter((s) => s !== "Other")} placeholder="e.g. Ajis, Saranya…" /></Field>
         <Field label="Stage"><select className="select" value={f.stage} onChange={(e) => set("stage", e.target.value)}>{LEAD_STAGES.map((s) => <option key={s}>{s}</option>)}</select></Field>
       </div>
       <div className="grid2">
@@ -3532,6 +3591,85 @@ function KbForm({ initial, onSave, onClose }) {
   );
 }
 
+// Shared prompt library — a place to keep the prompts the team reuses and copy
+// them in one tap. Backed by the `prompts` table (run allbee-prompts.sql once).
+function PromptForm({ initial, onSave, onClose }) {
+  const [f, setF] = useState(initial || { title: "", category: "General", body: "" });
+  const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const [err, setErr] = useState("");
+  const save = () => {
+    if (!f.title.trim()) { setErr("Add a title."); return; }
+    if (!(f.body || "").trim()) { setErr("Add the prompt text."); return; }
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), title: f.title.trim() });
+  };
+  return (
+    <Modal title={f.id ? "Edit prompt" : "New prompt"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
+      <div className="grid2">
+        <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Cold outreach email" /></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={PROMPT_CATEGORIES} placeholder="Custom category…" /></Field>
+      </div>
+      <Field label="Prompt" required><textarea className="textarea" style={{ minHeight: 200 }} value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="Paste or write the full prompt here…" /></Field>
+    </Modal>
+  );
+}
+
+function Prompts({ db, openModal, removeItem }) {
+  const [q, setQ] = useState("");
+  const [cat, setCat] = useState("all");
+  const [copiedId, setCopiedId] = useState(null);
+  const all = [...(db.prompts || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const cats = Array.from(new Set(all.map((p) => p.category).filter(Boolean)));
+  const list = all.filter((p) => (cat === "all" || p.category === cat) && (!q.trim() || (p.title + " " + (p.body || "") + " " + (p.category || "")).toLowerCase().includes(q.trim().toLowerCase())));
+  const copy = async (p) => { try { await navigator.clipboard.writeText(p.body || ""); setCopiedId(p.id); setTimeout(() => setCopiedId(null), 1500); } catch { alert("Couldn't copy — your browser blocked clipboard access."); } };
+  const del = (p) => removeItem("prompts", p, { name: p.title, audit: `deleted prompt "${p.title}"` });
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Prompts</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "prompt" })}><Plus size={16} />New prompt</button></div>
+      <p className="hint-line" style={{ marginTop: -8, marginBottom: 14 }}>A shared library of the prompts your team reuses — briefs, email templates, AI prompts. Add one, then copy it whenever you need it.</p>
+      <div className="filterbar">
+        <Field label="Search"><input className="input" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search prompts…" /></Field>
+        {cats.length > 0 && <Field label="Category"><select className="select" value={cat} onChange={(e) => setCat(e.target.value)}><option value="all">All categories</option>{cats.map((c) => <option key={c}>{c}</option>)}</select></Field>}
+      </div>
+      {list.length === 0 ? <div className="card"><Empty icon={<Sparkles size={22} color="var(--muted)" />} title="No prompts yet" text="Add the prompts your team uses most and copy them in one tap." action={<button className="btn primary" onClick={() => openModal({ type: "prompt" })}><Plus size={16} />New prompt</button>} /></div>
+        : <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))" }}>{list.map((p) => (
+          <div key={p.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 700, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title}</span>
+              {p.category && <span className="tag">{p.category}</span>}
+            </div>
+            <div className="hint-line" style={{ whiteSpace: "pre-wrap", maxHeight: 120, overflow: "hidden", fontSize: 13, lineHeight: 1.5 }}>{p.body}</div>
+            <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+              <button className="btn sm primary" onClick={() => copy(p)}>{copiedId === p.id ? <><Check size={13} />Copied</> : <><Copy size={13} />Copy</>}</button>
+              <button className="btn sm" onClick={() => openModal({ type: "prompt", initial: p })}><Pencil size={13} /></button>
+              <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete prompt?", body: `Delete "${p.title}"?`, note: "Moves to Recently deleted.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>
+            </div>
+          </div>
+        ))}</div>}
+    </div>
+  );
+}
+
+// A <select> whose last entry is "Other…", which reveals a text box so you can
+// type a custom value. Drop-in for any preset dropdown that should also accept
+// free text. `value` is the current string; `options` are the presets.
+function SelectOther({ value, onChange, options, placeholder = "Type here…" }) {
+  const [custom, setCustom] = useState(() => !!value && !options.includes(value));
+  const onSel = (e) => {
+    if (e.target.value === "__other__") { setCustom(true); onChange(""); }
+    else { setCustom(false); onChange(e.target.value); }
+  };
+  return (
+    <>
+      <select className="select" value={custom ? "__other__" : value} onChange={onSel}>
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+        <option value="__other__">Other… (type manually)</option>
+      </select>
+      {custom && <input className="input" style={{ marginTop: 8 }} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} autoFocus />}
+    </>
+  );
+}
+
 function RewardForm({ initial, onSave, onClose, team }) {
   const staff = (team || []).filter((p) => ["staff", "intern", "admin", "accountant"].includes(p.role));
   const [f, setF] = useState(initial || { userId: staff[0]?.id || "", kind: "Star performer", points: 10, note: "", date: todayISO() });
@@ -3551,7 +3689,7 @@ function RewardForm({ initial, onSave, onClose, team }) {
         </select>
       </Field>
       <div className="grid2">
-        <Field label="For"><select className="select" value={f.kind} onChange={(e) => set("kind", e.target.value)}>{REWARD_KINDS.map((k) => <option key={k}>{k}</option>)}</select></Field>
+        <Field label="For"><SelectOther value={f.kind} onChange={(v) => set("kind", v)} options={REWARD_KINDS} placeholder="Custom recognition…" /></Field>
         <Field label="Points"><input className="input" type="number" value={f.points} onChange={(e) => set("points", e.target.value)} /></Field>
       </div>
       <Field label="Note"><textarea className="textarea" value={f.note} onChange={(e) => set("note", e.target.value)} placeholder="What did they do well?" /></Field>
@@ -3941,18 +4079,27 @@ function Knowledge({ db, mutate, openModal, removeItem, isAdmin }) {
   );
 }
 
-function Chat({ db, mutate, me, team }) {
+function Chat({ db, mutate, me, team, onRefresh }) {
   const [text, setText] = useState("");
   const [editId, setEditId] = useState(null);
   const [editText, setEditText] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
   const endRef = useRef(null);
   const fileRef = useRef(null);
   const [busy, setBusy] = useState(false);
   const list = [...db.chat].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
+  // Realtime can lag on mobile/background tabs — gently re-pull while the chat is
+  // open so new messages show up without a manual refresh.
+  useEffect(() => {
+    if (!onRefresh) return;
+    const t = setInterval(() => { if (typeof document === "undefined" || document.visibilityState === "visible") onRefresh(); }, 12000);
+    return () => clearInterval(t);
+  }, [onRefresh]);
+  const refresh = async () => { if (!onRefresh) return; setRefreshing(true); try { await onRefresh(); } finally { setTimeout(() => setRefreshing(false), 400); } };
   // Read receipts: mark messages from others as seen by me (converges once all seen).
   useEffect(() => {
-    const unseen = db.chat.filter((m) => m.userId !== me.id && !(m.seenBy || []).includes(me.id));
+    const unseen = db.chat.filter((m) => m.userId !== me.id && !m.deleted && !(m.seenBy || []).includes(me.id));
     if (!unseen.length) return;
     const ids = new Set(unseen.map((m) => m.id));
     mutate((d) => ({ ...d, chat: d.chat.map((m) => ids.has(m.id) ? { ...m, seenBy: Array.from(new Set([...(m.seenBy || []), me.id])) } : m) }), null);
@@ -3972,9 +4119,13 @@ function Chat({ db, mutate, me, team }) {
   const onlineCount = (team || []).filter((p) => p.id !== me.id && isOnline(p)).length;
   const startEdit = (m) => { setEditId(m.id); setEditText(m.text); };
   const saveEdit = (m) => { const t = editText.trim(); if (!t) { setEditId(null); return; } mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, text: t, editedAt: Date.now() } : x) }), null); setEditId(null); setEditText(""); };
+  // Delete = tombstone (keeps message order, works under existing chat RLS).
+  const del = (m) => { if (!window.confirm("Delete this message for everyone?")) return; mutate((d) => ({ ...d, chat: d.chat.map((x) => x.id === m.id ? { ...x, deleted: true, text: "", attachment: null } : x) }), null); };
+  // Names of teammates who've seen one of my messages.
+  const seenNames = (m) => (m.seenBy || []).filter((u) => u !== me.id).map((u) => ((team || []).find((p) => p.id === u)?.name) || "Someone").filter(Boolean);
   return (
     <div className="content" style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 160px)" }}>
-      <div className="page-head"><h3>Team chat</h3><span className="spacer" />{onlineCount > 0 && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--pos)", display: "inline-block" }} />{onlineCount} online</span>}</div>
+      <div className="page-head"><h3>Team chat</h3><span className="spacer" />{onlineCount > 0 && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 10 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--pos)", display: "inline-block" }} />{onlineCount} online</span>}<button className="btn sm" onClick={refresh} disabled={refreshing} title="Refresh messages"><RefreshCw size={14} className={refreshing ? "spin" : ""} />Refresh</button></div>
       <div className="card" style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
         {list.length === 0 ? <Empty icon={<Send size={22} color="var(--muted)" />} title="Say hello 👋" text="This channel is shared with the whole internal team." />
           : list.map((m) => {
@@ -3988,12 +4139,14 @@ function Chat({ db, mutate, me, team }) {
                       <textarea className="textarea" style={{ minHeight: 44 }} value={editText} onChange={(e) => setEditText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(m); } }} autoFocus />
                       <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}><button className="btn sm" onClick={() => { setEditId(null); setEditText(""); }}>Cancel</button><button className="btn sm primary" onClick={() => saveEdit(m)}><Check size={13} />Save</button></div>
                     </div>
+                  ) : m.deleted ? (
+                    <div style={{ background: "var(--surface-2)", color: "var(--muted)", padding: "9px 13px", borderRadius: 12, fontSize: 13, fontStyle: "italic", display: "inline-flex", alignItems: "center", gap: 6 }}><X size={13} />This message was deleted</div>
                   ) : (
                     <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}{m.attachment && ((m.attachment.type || "").startsWith("image/")
                       ? <a href={m.attachment.url} target="_blank" rel="noreferrer"><img src={m.attachment.url} alt={m.attachment.name || ""} style={{ display: "block", maxWidth: 220, maxHeight: 220, borderRadius: 8, marginTop: m.text ? 8 : 0 }} /></a>
                       : <a href={m.attachment.url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: m.text ? 8 : 0, color: mine ? "#fff" : "var(--primary)", textDecoration: "underline" }}><Paperclip size={13} />{m.attachment.name || "Attachment"}</a>)}</div>
                   )}
-                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && (m.seenBy || []).filter((u) => u !== me.id).length > 0 ? " · Seen" : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}</div>
+                  {!m.deleted && <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{m.editedAt ? " · edited" : ""}{mine && seenNames(m).length > 0 ? " · Seen by " + (seenNames(m).length <= 2 ? seenNames(m).join(", ") : `${seenNames(m).slice(0, 2).join(", ")} +${seenNames(m).length - 2}`) : ""}{mine && editId !== m.id && withinMinutes(m.createdAt, 5) && <button onClick={() => startEdit(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Edit</button>}{mine && editId !== m.id && <button onClick={() => del(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--neg)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Delete</button>}</div>}
                 </div>
               </div>
             );
@@ -4450,6 +4603,7 @@ function CreateUserModal({ onClose }) {
 
 function ManageUserModal({ person, onClose }) {
   const [designation, setDesignation] = useState(person.designation || "");
+  const [username, setUsername] = useState(person.username || "");
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
@@ -4457,13 +4611,36 @@ function ManageUserModal({ person, onClose }) {
   const call = async (body) => { setBusy(true); setMsg(""); setErr(""); try { const { data, error } = await supabase.functions.invoke("admin-users", { body }); if (error) throw error; if (data && data.error) throw new Error(data.error); return true; } catch (e) { setErr((e && e.message) || "Action failed. Is the admin-users function deployed?"); return false; } finally { setBusy(false); } };
   const saveDes = async () => { if (await call({ action: "set_designation", userId: person.id, designation })) setMsg("Job title updated."); };
   const resetPw = async () => { if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; } if (await call({ action: "reset_password", userId: person.id, password: pw })) { setMsg("Password reset."); setPw(""); } };
+  // Username writes straight to the profile (no edge function needed).
+  const saveUsername = async () => {
+    setBusy(true); setMsg(""); setErr("");
+    const uname = username.trim().toLowerCase().replace(/\s+/g, "") || null;
+    try { const { error } = await supabase.from("profiles").update({ username: uname }).eq("id", person.id); if (error) throw error; setMsg("Username updated."); }
+    catch (e) { setErr((e && e.message && /duplicate|unique/i.test(e.message)) ? "That username is already taken." : ((e && e.message) || "Couldn't update the username.")); }
+    finally { setBusy(false); }
+  };
+  // Permanently delete: removes their login + profile so the email/username can be
+  // reused. Partners can't be deleted. Goes through the admin-users edge function.
+  const removeUser = async () => {
+    if (person.role === "superadmin") { setErr("Partners can't be deleted."); return; }
+    if (!window.confirm(`Permanently delete ${person.name}? This removes their login and profile. You can re-create the account with the same email afterwards.`)) return;
+    if (await call({ action: "delete", userId: person.id })) onClose();
+  };
   return (
     <Modal title={"Manage " + person.name} onClose={onClose} footer={<button className="btn" onClick={onClose}>Close</button>}>
       <Field label="Job title / designation"><div style={{ display: "flex", gap: 8 }}><input className="input" value={designation} onChange={(e) => setDesignation(e.target.value)} placeholder="e.g. Senior Developer" /><button className="btn primary" onClick={saveDes} disabled={busy}>Save</button></div></Field>
+      <Field label="Username" hint="They can sign in with this instead of their email."><div style={{ display: "flex", gap: 8 }}><input className="input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="e.g. priya" /><button className="btn primary" onClick={saveUsername} disabled={busy}>Save</button></div></Field>
       <Field label="Reset password" hint="Sets a new password for this user immediately."><div style={{ display: "flex", gap: 8 }}><input className="input" type="text" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="New password" /><button className="btn primary" onClick={resetPw} disabled={busy}>Reset</button></div></Field>
       {err && <div className="auth-msg err"><AlertTriangle size={14} /> {err}</div>}
       {msg && <div className="auth-msg ok"><Check size={14} /> {msg}</div>}
-      <p className="hint-line" style={{ marginTop: 8 }}>Requires the <b>admin-users</b> edge function to be deployed.</p>
+      {person.role !== "superadmin" && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+          <div className="lbl" style={{ fontSize: 12, fontWeight: 700, color: "var(--neg)", marginBottom: 6 }}>Danger zone</div>
+          <p className="hint-line" style={{ marginBottom: 10 }}>Permanently delete this account. Their login and profile are removed and the email/username can be reused to re-create them.</p>
+          <button className="btn danger" onClick={removeUser} disabled={busy}><Trash2 size={15} />Delete user</button>
+        </div>
+      )}
+      <p className="hint-line" style={{ marginTop: 12 }}>Delete, password reset and adding users need the <b>admin-users</b> edge function deployed. Username and job title save directly.</p>
     </Modal>
   );
 }
@@ -4478,6 +4655,7 @@ export default function App() {
   const [isDark, setIsDark] = useState(() => { try { const v = localStorage.getItem("allbee_theme"); return v ? v === "dark" : false; } catch { return false; } });
   const [route, setRoute] = useState("dashboard");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [topBusy, setTopBusy] = useState(false);
   const [userMenu, setUserMenu] = useState(false);
   const [modal, setModal] = useState(null); // {type, ...}
   const [balanceUser, setBalanceUser] = useState(null);
@@ -4814,6 +4992,7 @@ export default function App() {
   const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || t.assignedTo === currentUser)).length;
   const pendingLeave = isAdmin ? db.leave.filter((l) => l.status === "Pending").length : 0;
   const unreadNotifs = db.notifications.filter((n) => notifVisibleTo(n, profile) && !(n.reads || []).includes(me.id)).length;
+  const unreadChat = db.chat.filter((m) => m.userId !== me.id && !m.deleted && !(m.seenBy || []).includes(me.id)).length;
   const portalClients = team.filter((p) => p.role === "client");
   const unseenAnn = db.announcements.filter((a) => !profile?.notif_seen_at || (a.createdAt || 0) > new Date(profile.notif_seen_at).getTime()).length;
 
@@ -4850,9 +5029,10 @@ export default function App() {
       case "announcements": return <Announcements db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "documents": return <Documents db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
       case "knowledge": return <Knowledge db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
+      case "prompts": return <Prompts db={db} openModal={openModal} removeItem={removeItem} />;
       case "terms": return <TermsPage config={config} profile={profile} role={role} isAdmin={isAdmin} go={go} />;
       case "profile": return <MyProfile profile={profile} role={role} saveMyProfile={saveMyProfile} sessionEmail={session?.user?.email} />;
-      case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} />;
+      case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} onRefresh={reload} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
@@ -4888,6 +5068,7 @@ export default function App() {
       {key === "tasks" && myPending > 0 && <span className="badge pri">{myPending}</span>}
       {key === "leave" && pendingLeave > 0 && <span className="badge pri">{pendingLeave}</span>}
       {key === "notifications" && unreadNotifs > 0 && <span className="badge pri">{unreadNotifs}</span>}
+      {key === "chat" && unreadChat > 0 && <span className="badge pri">{unreadChat}</span>}
     </>
   );
   const renderNav = ([key, label, Icon]) => (
@@ -4938,6 +5119,10 @@ export default function App() {
                 </div>
               )}
               <div className="usermenu">
+                <button className="iconbtn" title="Refresh" style={{ marginRight: 4 }} disabled={topBusy}
+                  onClick={async () => { setTopBusy(true); try { await reload(); if (session) await loadPeople(session.user); } finally { setTimeout(() => setTopBusy(false), 400); } }}>
+                  <RefreshCw size={18} className={topBusy ? "spin" : ""} />
+                </button>
                 <button className="iconbtn" title="Announcements" style={{ position: "relative", marginRight: 4 }}
                   onClick={() => { go("announcements"); if (me.id) changeProfile(me.id, { notif_seen_at: new Date().toISOString() }); }}>
                   <Bell size={18} />
@@ -4982,6 +5167,7 @@ export default function App() {
         {modal?.type === "vault" && <VaultForm initial={modal.initial} onSave={(x) => saveOwned("vault", x)} onClose={() => setModal(null)} />}
         {modal?.type === "document" && <DocForm initial={modal.initial} team={team} portalClients={portalClients} onSave={(x) => saveOwned("documents", x)} onClose={() => setModal(null)} />}
         {modal?.type === "knowledge" && <KbForm initial={modal.initial} onSave={(x) => saveOwned("knowledge", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "prompt" && <PromptForm initial={modal.initial} onSave={(x) => saveOwned("prompts", x)} onClose={() => setModal(null)} />}
         {modal?.type === "reward" && <RewardForm initial={modal.initial} team={team} onSave={(x) => saveOwned("rewards", x)} onClose={() => setModal(null)} />}
         {modal?.type === "notification" && <NotificationForm initial={modal.initial} team={team} onSave={(x) => saveOwned("notifications", x)} onClose={() => setModal(null)} />}
         {modal?.type === "announcement" && <AnnouncementForm initial={modal.initial} onSave={(x) => saveOwned("announcements", x)} onClose={() => setModal(null)} />}
