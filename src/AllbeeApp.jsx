@@ -878,6 +878,17 @@ function avatarColor(name) {
   return STAFF_COLORS[h % STAFF_COLORS.length];
 }
 
+// Reusable avatar: shows the person's uploaded photo when there is one, otherwise
+// the coloured initial. Use anywhere a person is represented.
+function Avatar({ name, url, size = 26, fontSize, style }) {
+  const fs = fontSize || Math.max(10, Math.round(size * 0.42));
+  return (
+    <div className="avatar" style={{ background: avatarColor(name || "?"), width: size, height: size, fontSize: fs, overflow: "hidden", padding: 0, ...style }}>
+      {url ? <img src={url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : (name || "?")[0]}
+    </div>
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════════════
    FORMS
 ══════════════════════════════════════════════════════════════════════ */
@@ -2803,7 +2814,7 @@ function Team({ team, me, changeProfile, db, resolveResign }) {
                   <tr key={p.id} style={p.active === false ? { opacity: .55 } : undefined}>
                     <td>
                       <span className="who-cell">
-                        <span style={{ position: "relative", display: "inline-flex" }}><span className="avatar" style={{ background: avatarColor(p.name), width: 26, height: 26, fontSize: 11 }}>{p.name[0]}</span>{isOnline(p) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</span>
+                        <span style={{ position: "relative", display: "inline-flex" }}><Avatar name={p.name} url={p.photo_url} size={26} />{isOnline(p) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</span>
                         <span><div style={{ fontWeight: 600 }}>{p.name}{isSelf ? " (you)" : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{p.designation ? p.designation + " · " : ""}{p.email}</div></span>
                       </span>
                     </td>
@@ -4200,7 +4211,7 @@ function Chat({ db, mutate, me, team, onRefresh, isAdmin }) {
             const mine = m.userId === me.id;
             return (
               <div key={m.id} style={{ display: "flex", gap: 10, flexDirection: mine ? "row-reverse" : "row" }}>
-                <div style={{ position: "relative", flex: "none" }}><div className="avatar" style={{ background: avatarColor(m.userName), width: 30, height: 30, fontSize: 12 }}>{(m.userName || "?")[0]}</div>{isOnline((team || []).find((p) => p.id === m.userId)) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</div>
+                <div style={{ position: "relative", flex: "none" }}><Avatar name={m.userName} url={(team || []).find((p) => p.id === m.userId)?.photo_url} size={30} />{isOnline((team || []).find((p) => p.id === m.userId)) && <span title="Online" style={{ position: "absolute", right: -1, bottom: -1, width: 9, height: 9, borderRadius: "50%", background: "var(--pos)", border: "2px solid var(--surface, #fff)" }} />}</div>
                 <div style={{ maxWidth: "72%" }}>
                   {editId === m.id ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -4403,7 +4414,7 @@ function ClientPortal({ db, profile, signOut, isDark, config }) {
         <img className="brand-logo" src={co.logoUrl || LOGO_ICON} alt={co.name || "ALLBEE"} style={{ height: 30 }} />
         <div><h2 style={{ fontSize: 16 }}>{co.name || "ALLBEE Solutions"}</h2><div className="topbar-sub">Client portal</div></div>
         <span className="spacer" style={{ flex: 1 }} />
-        <div className="userchip" onClick={signOut} style={{ cursor: "pointer" }}><div className="avatar" style={{ background: avatarColor(profile?.name || "C") }}>{(profile?.name || "C")[0]}</div><span className="userchip-name">{profile?.name}</span><LogOut size={15} /></div>
+        <div className="userchip" onClick={signOut} style={{ cursor: "pointer" }}><Avatar name={profile?.name || "C"} url={profile?.photo_url} size={26} /><span className="userchip-name">{profile?.name}</span><LogOut size={15} /></div>
       </header>
       <div className="content" style={{ maxWidth: 820, margin: "0 auto" }}>
         <div className="page-head"><h3>Welcome, {profile?.name?.split(" ")[0] || "there"}</h3></div>
@@ -4746,6 +4757,20 @@ export default function App() {
   const isAdmin = isAdminRole(role);        // management level (superadmin OR admin)
   const canFinance = canFinanceRole(role);  // the money (superadmin OR accountant)
   const me = { id: session?.user?.id, name: currentUser, role };
+
+  // ── tap feedback ──────────────────────────────────────────────────────
+  // Subtle tap feedback on interactive elements, app-wide. Very light, and only
+  // on real taps of buttons/nav (not typing or scrolling). Works where the device
+  // supports the web vibration API (Android); iOS Safari has no equivalent.
+  useEffect(() => {
+    const onTap = (e) => {
+      const t = e.target;
+      const el = t && t.closest ? t.closest("button, .btn, .navitem, .iconbtn, .userchip, .seg button, [role='button']") : null;
+      if (el && !el.disabled) haptic(6);
+    };
+    document.addEventListener("pointerdown", onTap, { passive: true });
+    return () => document.removeEventListener("pointerdown", onTap);
+  }, []);
 
   // ── auth session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -5203,14 +5228,14 @@ export default function App() {
                   {unseenAnn > 0 && <span className="badge pri" style={{ position: "absolute", top: -5, right: -5, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, lineHeight: "16px" }}>{unseenAnn}</span>}
                 </button>
                 <div className="userchip" onClick={() => setUserMenu((v) => !v)}>
-                  <div className="avatar" style={{ background: avatarColor(currentUser) }}>{currentUser[0]}</div>
+                  <Avatar name={currentUser} url={profile?.photo_url} size={26} />
                   <span className="userchip-name">{currentUser}</span>
                   <span className={"role-badge " + (role || "staff")}>{ROLE_LABEL[role] || "Staff"}</span>
                 </div>
                 {userMenu && (
                   <div className="dropdown" onMouseLeave={() => setUserMenu(false)}>
                     <div className="drop-id">
-                      <div className="avatar" style={{ background: avatarColor(currentUser), width: 22, height: 22, fontSize: 10 }}>{currentUser[0]}</div>
+                      <Avatar name={currentUser} url={profile?.photo_url} size={22} fontSize={10} />
                       <div><div style={{ fontWeight: 700, fontSize: 13 }}>{currentUser}</div><div className="hint-line" style={{ fontSize: 11 }}>{session?.user?.email}</div></div>
                     </div>
                     {role !== "superadmin" && <button onClick={() => { setUserMenu(false); openModal({ type: "resign" }); }}><XCircle size={15} />Request resignation</button>}
