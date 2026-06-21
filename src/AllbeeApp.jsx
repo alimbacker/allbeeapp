@@ -225,8 +225,12 @@ async function applyDiff(prev, next) {
     }
     const deletes = [];
     for (const id of before.keys()) if (!after.has(id)) deletes.push(id);
-    if (upserts.length) ops.push(supabase.from(t).upsert(upserts).then((r) => { if (r.error) throw new Error(`Saving ${t}: ${r.error.message}`); }));
-    if (deletes.length) ops.push(supabase.from(t).delete().in("id", deletes).then((r) => { if (r.error) throw new Error(`Deleting from ${t}: ${r.error.message}`); }));
+    // The audit table is an append-only activity log. If it can't be written
+    // (e.g. its RLS policy hasn't been added yet) that must NEVER block the
+    // user's actual change — log it quietly and carry on.
+    const optional = t === "audit";
+    if (upserts.length) ops.push(supabase.from(t).upsert(upserts).then((r) => { if (r.error) { if (optional) { console.warn(`Audit log skipped: ${r.error.message}`); return; } throw new Error(`Saving ${t}: ${r.error.message}`); } }));
+    if (deletes.length) ops.push(supabase.from(t).delete().in("id", deletes).then((r) => { if (r.error) { if (optional) return; throw new Error(`Deleting from ${t}: ${r.error.message}`); } }));
   }
   await Promise.all(ops);
 }
