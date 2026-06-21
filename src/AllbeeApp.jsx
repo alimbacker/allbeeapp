@@ -936,9 +936,7 @@ function ShareForm({ kind, initial, onSave, onClose, currentUser }) {
         <Field label="Date" required><input className="input" type="date" value={f.date} onChange={(e) => up("date", e.target.value)} /></Field>
       </div>
       <Field label="Category">
-        <select className="select" value={f.category} onChange={(e) => up("category", e.target.value)}>
-          {(isIncome ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map((c) => <option key={c}>{c}</option>)}
-        </select>
+        <SelectOther value={f.category} onChange={(v) => up("category", v)} options={(isIncome ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).filter((c) => c !== "Other")} placeholder="Custom category…" />
       </Field>
 
       <Field label="Profit split" required error={touched && !splitOK ? `Split must total 100% (currently ${sum}%)` : ""}
@@ -1072,7 +1070,7 @@ function ProjectForm({ initial, onSave, onClose }) {
         <Field label="Client name"><input className="input" value={f.client} onChange={(e) => up("client", e.target.value)} /></Field>
       </div>
       <div className="grid2">
-        <Field label="Project type"><select className="select" value={f.type} onChange={(e) => up("type", e.target.value)}>{["Website", "Mobile App", "Software", "Other"].map((t) => <option key={t}>{t}</option>)}</select></Field>
+        <Field label="Project type"><SelectOther value={f.type} onChange={(v) => up("type", v)} options={["Website", "Mobile App", "Software"]} placeholder="Custom type…" /></Field>
         <Field label="Cost"><input className="input mono" type="number" min="0" value={f.cost} onChange={(e) => up("cost", e.target.value)} placeholder="50000" /></Field>
       </div>
       <div className="grid2">
@@ -2591,7 +2589,7 @@ function LeaveForm({ initial, me, onSave, onClose }) {
   return (
     <Modal title={initial?.id ? "Edit leave request" : "Request leave"} onClose={onClose}
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />Submit request</button></>}>
-      <Field label="Leave type"><select className="select" value={f.type} onChange={(e) => up("type", e.target.value)}>{LEAVE_TYPES.map((t) => <option key={t}>{t}</option>)}</select></Field>
+      <Field label="Leave type"><SelectOther value={f.type} onChange={(v) => up("type", v)} options={LEAVE_TYPES.filter((t) => t !== "Other")} placeholder="Other reason…" /></Field>
       {f.type === "Other" && <Field label="Specify type" required><input className="input" value={f.customType || ""} onChange={(e) => up("customType", e.target.value)} placeholder="e.g. Bereavement" /></Field>}
       <div className="grid2">
         <Field label="From" required><input className="input" type="date" value={f.fromDate} onChange={(e) => up("fromDate", e.target.value)} /></Field>
@@ -3362,7 +3360,7 @@ function LeadForm({ initial, onSave, onClose }) {
       </div>
       <div className="grid2">
         <Field label="Company"><input className="input" value={f.company || ""} onChange={(e) => set("company", e.target.value)} placeholder="Business name" /></Field>
-        <Field label="Service interested"><select className="select" value={f.service || "Website"} onChange={(e) => set("service", e.target.value)}>{LEAD_SERVICES.map((x) => <option key={x}>{x}</option>)}</select></Field>
+        <Field label="Service interested"><SelectOther value={f.service || "Website"} onChange={(v) => set("service", v)} options={LEAD_SERVICES.filter((x) => x !== "Other")} placeholder="Custom service…" /></Field>
       </div>
       <div className="grid2">
         <Field label="Referred by"><input className="input" value={f.referredBy || ""} onChange={(e) => set("referredBy", e.target.value)} placeholder="Who referred them?" /></Field>
@@ -3482,7 +3480,7 @@ function PlannedForm({ initial, onSave, onClose }) {
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
       <Field label="What is it?" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. Office rent" /></Field>
       <div className="grid2">
-        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{EXPENSE_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={EXPENSE_CATEGORIES.filter((c) => c !== "Other")} placeholder="Custom category…" /></Field>
         <Field label="Amount (₹)"><input className="input" type="number" value={f.amount} onChange={(e) => set("amount", e.target.value)} placeholder="0" /></Field>
       </div>
       <div className="grid2">
@@ -3509,7 +3507,7 @@ function VaultForm({ initial, onSave, onClose }) {
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
       <div className="grid2">
         <Field label="Service" required error={err}><input className="input" value={f.service} onChange={(e) => set("service", e.target.value)} placeholder="e.g. Instagram" /></Field>
-        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{VAULT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={VAULT_CATEGORIES.filter((c) => c !== "Other")} placeholder="Custom category…" /></Field>
       </div>
       <Field label="Username / email"><input className="input" value={f.username} onChange={(e) => set("username", e.target.value)} placeholder="login@…" /></Field>
       <Field label="Password">
@@ -3548,7 +3546,7 @@ function DocForm({ initial, onSave, onClose, team, portalClients }) {
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
       <div className="grid2">
         <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. NDA template" /></Field>
-        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{DOC_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={DOC_CATEGORIES.filter((c) => c !== "Other")} placeholder="Custom category…" /></Field>
       </div>
       <Field label="File or link" required hint="Upload (image ≤10MB, PDF ≤50MB, other ≤25MB) or paste a link.">
         <div style={{ display: "flex", gap: 8 }}>
@@ -3598,7 +3596,7 @@ function KbForm({ initial, onSave, onClose }) {
       footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={15} />Save</button></>}>
       <div className="grid2">
         <Field label="Title" required error={err}><input className="input" value={f.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. How to onboard a client" /></Field>
-        <Field label="Category"><select className="select" value={f.category} onChange={(e) => set("category", e.target.value)}>{KB_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => set("category", v)} options={KB_CATEGORIES.filter((c) => c !== "Other")} placeholder="Custom category…" /></Field>
       </div>
       <Field label="Content"><textarea className="textarea" style={{ minHeight: 180 }} value={f.body} onChange={(e) => set("body", e.target.value)} placeholder="Write the guide…" /></Field>
     </Modal>
