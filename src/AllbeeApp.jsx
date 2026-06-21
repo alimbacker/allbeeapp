@@ -1289,7 +1289,7 @@ function BalanceDetail({ db, user, onClose, onFull }) {
           <table className="tbl">
             <thead><tr><th>Date</th><th>Client / item</th><th>Type</th><th>%</th><th className="num-cell">Credited</th><th className="num-cell">Debited</th><th className="num-cell">Balance</th></tr></thead>
             <tbody>
-              {rows.map((r, i) => (
+              {[...rows].reverse().map((r, i) => (
                 <tr key={i}>
                   <td className="mono" style={{ whiteSpace: "nowrap" }}>{fmtDate(r.date)}</td>
                   <td><div style={{ fontWeight: 600 }}>{r.project}</div><div style={{ fontSize: 12, color: "var(--muted)" }}>{r.client}</div></td>
@@ -1641,7 +1641,7 @@ function AccountFull({ db, user, goBack }) {
                 <th className="num-cell">Credited</th><th className="num-cell">Debited</th><th className="num-cell">Running</th><th>Notes</th>
               </tr></thead>
               <tbody>
-                {rows.map((r, i) => (
+                {[...rows].reverse().map((r, i) => (
                   <tr key={i}>
                     <td className="mono" style={{ whiteSpace: "nowrap" }}>{fmtDate(r.date)}</td>
                     <td>{r.client}</td>
