@@ -1962,7 +1962,10 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
 }
 
 function Progress({ db, mutate, isAdmin = true, currentUser, openTask }) {
-  const list = db.tasks.filter((t) => t.status === "In Progress");
+  const inProgress = db.tasks.filter((t) => t.status === "In Progress");
+  // Admins monitor the whole team; staff/interns see the in-progress tasks
+  // they're assigned to (so they can update their own progress).
+  const list = isAdmin ? inProgress : inProgress.filter((t) => taskAssignees(t).includes(currentUser));
   const setProgress = (t, v) => {
     const done = v >= 100;
     const history = done ? [...(t.history || []), { status: "Completed", at: Date.now(), by: currentUser }] : (t.history || []);
@@ -2167,10 +2170,33 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
     body: `Restore ${r.module.toLowerCase()} "${r.name}" to its original module?`, note: "It will reappear where it was before.",
     onConfirm: () => restoreItem(r),
   });
+  // Turn a stored field name into a readable label ("assignedTo" → "Assigned To").
+  const humanizeKey = (k) => k.replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+  // Every meaningful field of the deleted record, formatted for display. Arrays
+  // are joined, timestamps are made readable, booleans become Yes/No. Only the
+  // internal id is hidden.
   const detailsOf = (r) => {
     const it = r.item || {};
-    const skip = new Set(["id", "createdAt", "history", "comments", "attachments"]);
-    return Object.entries(it).filter(([k, v]) => !skip.has(k) && v !== "" && v != null && typeof v !== "object").slice(0, 10);
+    const skip = new Set(["id"]);
+    const out = [];
+    for (const [k, v] of Object.entries(it)) {
+      if (skip.has(k) || v === "" || v == null) continue;
+      let text;
+      if (Array.isArray(v)) {
+        if (!v.length) continue;
+        text = v.map((x) => (x && typeof x === "object" ? (x.title || x.name || x.status || x.text || JSON.stringify(x)) : String(x))).join(", ");
+      } else if (typeof v === "boolean") {
+        text = v ? "Yes" : "No";
+      } else if (typeof v === "object") {
+        text = JSON.stringify(v);
+      } else if (typeof v === "number" && v > 1e12 && /(at|At|ts)$/.test(k)) {
+        text = fmtTime(v); // millisecond timestamp
+      } else {
+        text = String(v);
+      }
+      out.push([humanizeKey(k), text]);
+    }
+    return out;
   };
 
   return (
@@ -2205,7 +2231,7 @@ function RecentlyDeleted({ db, openModal, restoreItem }) {
                       {open[r.id] && rows.length > 0 && (
                         <tr><td colSpan={6} style={{ background: "var(--surface-2)" }}>
                           <div className="detail-json">
-                            {rows.map(([k, v]) => <div key={k}><span className="k">{k}:</span> {String(v)}</div>)}
+                            {rows.map(([k, v]) => <div key={k}><span className="k">{k}:</span> {v}</div>)}
                           </div>
                         </td></tr>
                       )}
@@ -2489,8 +2515,8 @@ function StaffDashboard({ db, me, go, mutate, openModal, team = [] }) {
   const hr = new Date().getHours();
   const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
 
-  const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
-  const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null); };
+  const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), { action: "checked in", module: "Attendance" });
+  const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), { action: "checked out", module: "Attendance" }); };
   const checkIn = () => openModal({ type: "okConfirm", title: "Check in?", body: "Type OK to confirm your check-in.", actionLabel: "Check in", icon: <LogIn size={15} />, onConfirm: () => { haptic(12); doCheckIn(); } });
   const checkOut = () => openModal({ type: "okConfirm", title: "Check out?", body: "Type OK to confirm your check-out.", actionLabel: "Check out", icon: <CheckCircle2 size={15} />, onConfirm: () => { haptic(12); doCheckOut(); } });
 
@@ -2557,9 +2583,10 @@ function attStatus(db, userId, dateISO) {
   return { label: "Present", tone: "pos" };
 }
 
-function Attendance({ db, mutate, me, isAdmin, team, openModal }) {
+function Attendance({ db, mutate, me, isAdmin, isSuper, team, openModal }) {
   const today = todayISO();
   const [date, setDate] = useState(today);
+  const [editing, setEditing] = useState(null); // super-admin attendance edit: { p, a }
 
   if (!isAdmin) {
     const mineAll = db.attendance.filter((a) => a.userId === me.id);
@@ -2571,8 +2598,8 @@ function Attendance({ db, mutate, me, isAdmin, team, openModal }) {
     const todayH = sumHours(todays);
     const weekH = sumHours(mineAll.filter((a) => new Date(a.date + "T00:00:00") >= weekStart));
     const monthH = sumHours(mineAll.filter((a) => sameMonth(a.date)));
-    const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), null);
-    const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), null); };
+    const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), { action: "checked in", module: "Attendance" });
+    const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), { action: "checked out", module: "Attendance" }); };
     const checkIn = () => openModal({ type: "okConfirm", title: "Check in?", body: "Type OK to confirm your check-in.", actionLabel: "Check in", icon: <LogIn size={15} />, onConfirm: () => { haptic(12); doCheckIn(); } });
     const checkOut = () => openModal({ type: "okConfirm", title: "Check out?", body: "Type OK to confirm your check-out.", actionLabel: "Check out", icon: <CheckCircle2 size={15} />, onConfirm: () => { haptic(12); doCheckOut(); } });
     return (
@@ -2614,11 +2641,29 @@ function Attendance({ db, mutate, me, isAdmin, team, openModal }) {
     );
   }
 
-  // admin roster
-  const roster = team.map((p) => ({ p, a: attendanceFor(db, p.id, date), st: attStatus(db, p.id, date) }));
+  // admin roster — only real, active team members (no client portal accounts,
+  // no suspended/resigned/terminated people).
+  const roster = team
+    .filter((p) => p.role !== "client" && p.active !== false)
+    .map((p) => ({ p, a: attendanceFor(db, p.id, date), st: attStatus(db, p.id, date) }));
   const present = roster.filter((r) => r.st.label === "Present" || r.st.label === "Checked out").length;
   const onLeave = roster.filter((r) => r.st.label === "On leave").length;
   const absent = roster.filter((r) => r.st.label === "Absent").length;
+  // Super-admins can correct or fill in attendance for any member on the chosen
+  // date: editing the matching record if there is one, otherwise creating it.
+  const saveAttendance = (member, record, checkInISO, checkOutISO) => {
+    mutate((d) => record
+      ? { ...d, attendance: d.attendance.map((x) => x.id === record.id ? { ...x, checkIn: checkInISO, checkOut: checkOutISO } : x) }
+      : { ...d, attendance: [...d.attendance, { id: uid(), userId: member.id, userName: member.name, date, checkIn: checkInISO, checkOut: checkOutISO, createdAt: Date.now() }] },
+      { action: `edited ${member.name}'s attendance for ${fmtDate(date)}`, module: "Attendance" });
+    setEditing(null);
+  };
+  // Mark absent: drop every session that member has on the chosen date.
+  const clearAttendance = (member) => {
+    mutate((d) => ({ ...d, attendance: d.attendance.filter((x) => !(x.userId === member.id && x.date === date)) }),
+      { action: `cleared ${member.name}'s attendance for ${fmtDate(date)}`, module: "Attendance" });
+    setEditing(null);
+  };
   return (
     <div className="content">
       <div className="page-head"><h3>Attendance</h3><span className="spacer" />
@@ -2632,20 +2677,60 @@ function Attendance({ db, mutate, me, isAdmin, team, openModal }) {
         {roster.length === 0 ? <Empty icon={<Users size={22} color="var(--muted)" />} title="No team members yet" text="Staff who create accounts will appear here." /> : (
           <div style={{ overflowX: "auto" }}>
             <table className="tbl">
-              <thead><tr><th>Member</th><th>Status</th><th>In</th><th>Out</th><th className="num-cell">Hours</th></tr></thead>
+              <thead><tr><th>Member</th><th>Status</th><th>In</th><th>Out</th><th className="num-cell">Hours</th>{isSuper && <th></th>}</tr></thead>
               <tbody>{roster.map(({ p, a, st }) => (
                 <tr key={p.id}>
                   <td><span className="who-cell"><span className="avatar" style={{ background: avatarColor(p.name), width: 24, height: 24, fontSize: 10 }}>{p.name[0]}</span>{p.name}</span></td>
                   <td><span className={"badge " + (st.tone === "muted" ? "" : st.tone)} style={st.tone === "muted" ? { background: "var(--surface-2)", color: "var(--muted)" } : undefined}>{st.label}</span></td>
                   <td className="mono">{clockTime(a?.checkIn)}</td><td className="mono">{clockTime(a?.checkOut)}</td>
                   <td className="num-cell mono">{a?.checkOut ? hoursBetween(a.checkIn, a.checkOut)?.toFixed(1) : "—"}</td>
+                  {isSuper && <td><div className="row-actions"><button className="btn sm" onClick={() => setEditing({ p, a })}><Pencil size={13} />Edit</button></div></td>}
                 </tr>
               ))}</tbody>
             </table>
           </div>
         )}
       </div>
+      {editing && <AttendanceEditModal member={editing.p} record={editing.a} date={date}
+        onClose={() => setEditing(null)}
+        onSave={(ci, co) => saveAttendance(editing.p, editing.a, ci, co)}
+        onClear={() => clearAttendance(editing.p)} />}
     </div>
+  );
+}
+
+// Super-admin: set/correct a member's check-in & check-out for one date. Times
+// are entered and shown in local time; an empty check-out means still on the clock.
+function AttendanceEditModal({ member, record, date, onSave, onClear, onClose }) {
+  const toTimeInput = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+  const [inT, setInT] = useState(toTimeInput(record?.checkIn) || "09:00");
+  const [outT, setOutT] = useState(toTimeInput(record?.checkOut));
+  const atTime = (hhmm) => {
+    if (!hhmm) return null;
+    const [y, m, d] = date.split("-").map(Number);
+    const [hh, mm] = hhmm.split(":").map(Number);
+    return new Date(y, m - 1, d, hh, mm, 0, 0).toISOString();
+  };
+  const save = () => {
+    if (!inT) return;
+    const ci = atTime(inT);
+    const co = atTime(outT);
+    if (co && new Date(co) < new Date(ci)) { alert("Check-out can't be before check-in."); return; }
+    onSave(ci, co);
+  };
+  return (
+    <Modal title={`Edit attendance — ${member.name}`} onClose={onClose}
+      footer={<>
+        {record && <button className="btn danger" style={{ marginRight: "auto" }} onClick={onClear}><Trash2 size={15} />Mark absent</button>}
+        <button className="btn" onClick={onClose}>Cancel</button>
+        <button className="btn primary" onClick={save} disabled={!inT}><Check size={16} />Save</button>
+      </>}>
+      <p className="hint-line" style={{ marginBottom: 14, lineHeight: 1.5 }}>Set the check-in and check-out for <b style={{ color: "var(--ink)" }}>{fmtDate(date)}</b>. Leave check-out empty to mark them still checked in.</p>
+      <div className="grid2">
+        <Field label="Check in" required><input className="input" type="time" value={inT} onChange={(e) => setInT(e.target.value)} /></Field>
+        <Field label="Check out"><input className="input" type="time" value={outT} onChange={(e) => setOutT(e.target.value)} /></Field>
+      </div>
+    </Modal>
   );
 }
 
@@ -2815,7 +2900,7 @@ function Team({ team, me, changeProfile, db, resolveResign }) {
   const [creating, setCreating] = useState(false);
   const [manageFor, setManageFor] = useState(null);
   const count = (r) => team.filter((p) => p.role === r).length;
-  const setStatus = (p, status) => changeProfile(p.id, { status, active: STATUS_ACTIVE[status] });
+  const setStatus = (p, status) => changeProfile(p.id, { status, active: STATUS_ACTIVE[status] }, `set ${p.name} to ${STATUS_LABEL[status] || status}`);
   const moduleSummary = (p) => {
     if (p.role === "superadmin" || p.role === "admin") return "All modules";
     if (p.role === "accountant") return "Share & accounts, Withdrawals";
@@ -2826,8 +2911,8 @@ function Team({ team, me, changeProfile, db, resolveResign }) {
   const isSuper = me.role === "superadmin";
   const pending = team.filter((p) => (p.role === "staff" || p.role === "client") && p.approved === false);
   const roster = team.filter((p) => p.role !== "client");          // clients live in the portal, not the internal roster
-  const approve = (p) => { haptic(10); changeProfile(p.id, { approved: true }); };
-  const reject = (p) => changeProfile(p.id, { approved: false, status: "terminated", active: false });
+  const approve = (p) => { haptic(10); changeProfile(p.id, { approved: true }, `approved ${p.name}'s account`); };
+  const reject = (p) => changeProfile(p.id, { approved: false, status: "terminated", active: false }, `rejected ${p.name}'s account`);
   return (
     <div className="content">
       <div className="page-head"><h3>Team</h3><span className="spacer" />{isSuper && <button className="btn primary" onClick={() => setCreating(true)}><Plus size={16} />Add user</button>}</div>
@@ -2893,7 +2978,7 @@ function Team({ team, me, changeProfile, db, resolveResign }) {
                       {isSuper
                         ? <span className="role-badge superadmin">Super admin</span>
                         : <select className="select" style={{ width: "auto", padding: "5px 8px" }} value={p.role} disabled={isSelf}
-                            onChange={(e) => changeProfile(p.id, { role: e.target.value })}>
+                            onChange={(e) => changeProfile(p.id, { role: e.target.value }, `changed ${p.name}'s role to ${ROLE_LABEL[e.target.value] || e.target.value}`)}>
                             {ROLE_OPTIONS.map((r) => <option key={r} value={r}>{ROLE_LABEL[r]}</option>)}
                           </select>}
                     </td>
@@ -2923,7 +3008,7 @@ function Team({ team, me, changeProfile, db, resolveResign }) {
           Partners (Haji &amp; Alim) and accountants are the only people who see Share &amp; accounts and Withdrawals. Admins run the team, projects and approvals but not the money. Set a status of Suspended, Resigned or Terminated to revoke someone's access immediately; On leave keeps it.
         </div>
       </div>
-      {permFor && <PermsModal person={permFor} onClose={() => setPermFor(null)} onSave={(modules) => changeProfile(permFor.id, { perms: { ...(permFor.perms || {}), modules } })} />}
+      {permFor && <PermsModal person={permFor} onClose={() => setPermFor(null)} onSave={(modules) => changeProfile(permFor.id, { perms: { ...(permFor.perms || {}), modules } }, `updated ${permFor.name}'s module access`)} />}
       {creating && <CreateUserModal onClose={() => setCreating(false)} />}
       {manageFor && <ManageUserModal person={manageFor} onClose={() => setManageFor(null)} />}
     </div>
@@ -3231,7 +3316,7 @@ const NAV = [
   ["performance", "Performance", TrendingUp, "insight"],
   ["rewards", "Rewards", Award, "collab"],
   ["team", "Team", Users, "admin"],
-  ["progress", "Progress", Activity, "admin"],
+  ["progress", "Progress", Activity, "work"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
   ["profile", "My profile", User, "everyone"],
@@ -5035,10 +5120,18 @@ export default function App() {
     catch (e) { setSyncError(e.message || String(e)); }
   }, []);
 
-  const changeProfile = useCallback(async (id, patch) => {
-    try { await updateProfile(id, patch); if (session) await loadPeople(session.user); }
+  const changeProfile = useCallback(async (id, patch, auditAction) => {
+    try {
+      await updateProfile(id, patch);
+      // Profile updates write straight to Postgres (not through `mutate`), so on
+      // their own they never reach the audit log. When the caller supplies a
+      // description (role/status/approval changes), record it so the Audit log
+      // shows team-management actions too.
+      if (auditAction) mutate((d) => d, { action: auditAction, module: "Team" });
+      if (session) await loadPeople(session.user);
+    }
     catch (e) { setSyncError(e.message || String(e)); }
-  }, [session, loadPeople]);
+  }, [session, loadPeople, mutate]);
 
   // Permanently remove a registered client (a self-signed-up portal account).
   // Same approach as Manage user: delete the profile row (frees the email), then
@@ -5055,8 +5148,9 @@ export default function App() {
       return;
     }
     try { await supabase.functions.invoke("admin-users", { body: { action: "delete", userId: person.id } }); } catch { /* edge function optional — profile already removed */ }
+    mutate((d) => d, { action: `deleted client account "${person.name}"`, module: "Clients" });
     if (session) await loadPeople(session.user);
-  }, [session, loadPeople]);
+  }, [session, loadPeople, mutate]);
 
   // first-login profile completion + T&C acceptance (both write to my own row)
   const saveMyProfile = useCallback((patch) => changeProfile(me.id, patch), [changeProfile, me.id]);
@@ -5245,7 +5339,7 @@ export default function App() {
           ? <StaffDashboard db={db} me={me} go={go} mutate={mutate} openModal={openModal} team={team} />
           : <Dashboard db={db} bal={bal} go={go} openBalance={openBalance} showMoney={canFinance} showOps={isAdmin} team={team} />;
       case "tasks": return <Tasks db={db} mutate={mutate} openModal={openModal} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} removeItem={removeItem} />;
-      case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} team={team} openModal={openModal} />;
+      case "attendance": return <Attendance db={db} mutate={mutate} me={me} isAdmin={isAdmin} isSuper={isSuper} team={team} openModal={openModal} />;
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} removeItem={removeItem} openModal={openModal} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} db={db} resolveResign={resolveResign} />;
