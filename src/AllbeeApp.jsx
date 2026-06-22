@@ -96,7 +96,7 @@ const STATUS_OPTIONS = ["active", "on_leave", "suspended", "resigned", "terminat
 // statuses that revoke sign-in (the row's `active` flag is set from this)
 const STATUS_ACTIVE = { active: true, on_leave: true, suspended: false, resigned: false, terminated: false };
 // business modules an admin can grant to an individual staff member, one by one
-const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["quotations", "Quotations"], ["invoices", "Invoices"], ["portal-posts", "Client updates"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"], ["sheets", "Sheets"]];
+const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["quotations", "Quotations"], ["invoices", "Invoices"], ["portal-posts", "Client updates"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"], ["sheets", "Sheets"], ["prompts", "Prompts"]];
 // Who must accept Terms & Conditions before using the app. Partners (superadmin)
 // author the agreements, so they're exempt; everyone else signs.
 const TNC_ROLES = ["admin", "accountant", "staff", "intern"];
@@ -143,7 +143,18 @@ function navAllowed(tag, role, perms) {
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-const todayISO = () => new Date().toISOString().slice(0, 10);
+// LOCAL calendar date as YYYY-MM-DD. We deliberately do NOT use toISOString(),
+// which returns the date in UTC: for India (UTC+5:30) any check-in before
+// 5:30 AM local time would otherwise be stamped with the *previous* day, so the
+// record showed up under yesterday and "today's" filter never matched it (which
+// also made the app ask the person to check in again). fmtDate/clockTime/
+// sameMonth all already work in local time, so this keeps everything consistent.
+const todayISO = () => {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${m}-${day}`;
+};
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 function money(n, { sign = false } = {}) {
@@ -233,6 +244,28 @@ async function applyDiff(prev, next) {
     if (deletes.length) ops.push(supabase.from(t).delete().in("id", deletes).then((r) => { if (r.error) { if (optional) return; throw new Error(`Deleting from ${t}: ${r.error.message}`); } }));
   }
   await Promise.all(ops);
+}
+
+// Supabase access tokens (JWTs) are short-lived. If the tab/app was asleep (laptop
+// closed, phone locked) the background auto-refresh may not have fired, so the very
+// next write goes out with an already-expired token and the server rejects it with
+// "JWT expired" — and because our writes are optimistic, the change looked saved on
+// screen but never reached the database (so it vanished on the next reload and the
+// person was asked to check in again). This refreshes the session and retries the
+// write exactly once before giving up, which clears the common expired-token case.
+async function persistWithRetry(prev, next) {
+  try {
+    await applyDiff(prev, next);
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (/jwt|token|expired|401|unauthor/i.test(msg)) {
+      const { error } = await supabase.auth.refreshSession();
+      if (error) throw e;          // refresh itself failed → a real re-sign-in is needed
+      await applyDiff(prev, next); // retry once now that we hold a fresh token
+    } else {
+      throw e;
+    }
+  }
 }
 
 // Replace the entire database (used by "Import backup").
@@ -388,24 +421,36 @@ function ledgerFor(db, user) {
 // Who may move a task through its workflow (Accept → Start → Complete → undo):
 // only the assigned person. A task assigned to both partners can be acted on
 // by either Haji or Alim.
-const taskAssignees = (t) => (t.assignedTo === COMBINED ? USERS.slice() : [t.assignedTo]);
+// The people a task is assigned to. New tasks carry an explicit `assignees`
+// array (one OR many people). Older tasks only have `assignedTo` — a single
+// name, or the special "Haji & Alim" combined label — so we fall back to that.
+const taskAssignees = (t) => {
+  if (Array.isArray(t.assignees) && t.assignees.length) return t.assignees.slice();
+  if (t.assignedTo === COMBINED) return USERS.slice();
+  return t.assignedTo ? [t.assignedTo] : [];
+};
+const isMultiAssignee = (t) => taskAssignees(t).length > 1;
+const assigneeText = (t) => taskAssignees(t).join(", ") || "—";
 const canActOnTask = (t, name) => taskAssignees(t).includes(name);
 // Who may edit / delete / monitor a task: an admin or the person who created it.
 const canEditTask = (t, name, isAdmin) => isAdmin || t.assignedBy === name;
 
-// ── dual-accept for "Haji & Alim" tasks ───────────────────────────────────
-// A task assigned to BOTH partners needs each of them to Accept before it can
-// Start; a single-assignee task needs only that one person. Either may Complete.
+// ── multi-person accept ───────────────────────────────────────────────────
+// A task with more than one assignee needs EACH assignee to Accept before it
+// can Start; a single-assignee task needs only that one person. Any assignee
+// may Start/Complete once accepted. (This also covers the old "Haji & Alim"
+// combined tasks, which now simply have two assignees.)
 const taskAccepts = (t) => (Array.isArray(t.accepts) ? t.accepts : []);
 
 // The workflow patch produced when `by` clicks the action button. Returns only
-// the fields to merge into the task. For a combined task still gathering both
-// partners' acceptances it records the acceptance and keeps the status "Created".
+// the fields to merge into the task. For a multi-assignee task still gathering
+// everyone's acceptance it records the acceptance and keeps the status "Created".
 function nextTaskState(t, by) {
   const accepts = taskAccepts(t);
-  if (t.status === "Created" && t.assignedTo === COMBINED) {
+  const assignees = taskAssignees(t);
+  if (t.status === "Created" && assignees.length > 1) {
     const merged = accepts.includes(by) ? accepts : [...accepts, by];
-    if (!USERS.every((u) => merged.includes(u))) {
+    if (!assignees.every((u) => merged.includes(u))) {
       return { accepts: merged, history: [...(t.history || []), { status: `Accepted by ${by}`, at: Date.now(), by }] };
     }
     return { status: "Accepted", accepts: merged, progress: t.progress || 0, history: [...(t.history || []), { status: "Accepted", at: Date.now(), by }] };
@@ -419,8 +464,9 @@ function nextTaskState(t, by) {
 // Label + disabled state for the workflow button. `null` means no action (done).
 function taskAction(t, by) {
   if (t.status === "Completed") return null;
-  if (t.status === "Created" && t.assignedTo === COMBINED && taskAccepts(t).includes(by)) {
-    const waiting = USERS.filter((u) => !taskAccepts(t).includes(u)).join(" & ");
+  const assignees = taskAssignees(t);
+  if (t.status === "Created" && assignees.length > 1 && taskAccepts(t).includes(by)) {
+    const waiting = assignees.filter((u) => !taskAccepts(t).includes(u)).join(", ");
     return { label: `Waiting for ${waiting}`, disabled: true };
   }
   return { label: t.status === "Created" ? "Accept" : t.status === "Accepted" ? "Start" : "Complete", disabled: false };
@@ -1020,23 +1066,40 @@ function WithdrawForm({ balances, defaultUser, onSave, onClose }) {
 }
 
 function TaskForm({ initial, onSave, onClose, currentUser, team = USERS, isAdmin = true }) {
-  const others = team.filter((n) => n !== currentUser);
-  // Admins choose any teammate, plus a combined "Haji & Alim" option.
-  const assigneeOptions = isAdmin ? [...team, COMBINED] : [currentUser];
+  // Everyone (admins, staff AND interns) can assign a task to one or more
+  // teammates. The roster always includes the person creating it, so they can
+  // assign work to themselves too.
+  const roster = team.includes(currentUser) ? team : [currentUser, ...team];
+  const initialAssignees = () => {
+    if (Array.isArray(initial?.assignees) && initial.assignees.length) return initial.assignees.slice();
+    if (initial?.assignedTo === COMBINED) return USERS.slice();
+    if (initial?.assignedTo) return [initial.assignedTo];
+    return [currentUser];
+  };
   const [f, setF] = useState(() => ({
-    title: "", desc: "", assignedBy: currentUser, assignedTo: initial?.assignedTo || (isAdmin ? (others[0] || currentUser) : currentUser),
+    title: "", desc: "", assignedBy: currentUser,
     priority: "Medium", due: "", notes: "", ...initial,
+    assignees: initialAssignees(),
   }));
   const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
-  const valid = f.title.trim().length > 0;
+  const toggleAssignee = (name) => setF((s) => ({
+    ...s,
+    assignees: s.assignees.includes(name) ? s.assignees.filter((x) => x !== name) : [...s.assignees, name],
+  }));
+  const valid = f.title.trim().length > 0 && f.assignees.length > 0;
   const save = () => {
     if (!valid) return;
+    const assignees = f.assignees.slice();
+    // Keep a readable `assignedTo` string for older/simple views, and preserve
+    // the special two-partner label so existing combined-task behaviour is unchanged.
+    const bothPartners = assignees.length === USERS.length && USERS.every((u) => assignees.includes(u));
+    const assignedTo = assignees.length === 1 ? assignees[0] : bothPartners ? COMBINED : assignees.join(", ");
     onSave({
       ...initial, id: initial?.id || uid(), title: f.title.trim(), desc: f.desc.trim(),
-      assignedBy: f.assignedBy, assignedTo: f.assignedTo, priority: f.priority, due: f.due,
+      assignedBy: f.assignedBy, assignedTo, assignees, priority: f.priority, due: f.due,
       notes: f.notes.trim(), status: initial?.status || "Created", progress: initial?.progress ?? 0,
       history: initial?.history || [{ status: "Created", at: Date.now(), by: f.assignedBy }],
-      comments: initial?.comments || [], attachments: initial?.attachments || [],
+      comments: initial?.comments || [], attachments: initial?.attachments || [], accepts: initial?.accepts || [],
       createdAt: initial?.createdAt || Date.now(),
     });
     onClose();
@@ -1047,14 +1110,17 @@ function TaskForm({ initial, onSave, onClose, currentUser, team = USERS, isAdmin
         <button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />{initial?.id ? "Save task" : "Create task"}</button></>}>
       <Field label="Task title" required><input className="input" value={f.title} onChange={(e) => up("title", e.target.value)} placeholder="Design the landing page" /></Field>
       <Field label="Description"><textarea className="textarea" value={f.desc} onChange={(e) => up("desc", e.target.value)} placeholder="Full, detailed instructions — write as much as you need." /></Field>
-      <div className="grid2">
-        <Field label="Assigned by"><input className="input" value={f.assignedBy} disabled style={{ opacity: .7 }} /></Field>
-        <Field label="Assigned to" hint={f.assignedTo === COMBINED ? "Either partner can accept, start or complete it." : undefined}>
-          {isAdmin
-            ? <select className="select" value={f.assignedTo} onChange={(e) => up("assignedTo", e.target.value)}>{assigneeOptions.map((u) => <option key={u}>{u}</option>)}</select>
-            : <input className="input" value={f.assignedTo} disabled style={{ opacity: .7 }} />}
-        </Field>
-      </div>
+      <Field label="Assigned by"><input className="input" value={f.assignedBy} disabled style={{ opacity: .7 }} /></Field>
+      <Field label={`Assign to${f.assignees.length > 1 ? ` · ${f.assignees.length} people` : ""}`} required
+        hint={f.assignees.length > 1 ? "Everyone selected must accept before the task can start; any of them can complete it." : undefined}>
+        <div className="perm-list">
+          {roster.map((n) => (
+            <label key={n} className="perm-item">
+              <input type="checkbox" checked={f.assignees.includes(n)} onChange={() => toggleAssignee(n)} />{n}{n === currentUser ? " (you)" : ""}
+            </label>
+          ))}
+        </div>
+      </Field>
       <div className="grid2">
         <Field label="Priority"><select className="select" value={f.priority} onChange={(e) => up("priority", e.target.value)}>{PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select></Field>
         <Field label="Due date"><input className="input" type="date" value={f.due} onChange={(e) => up("due", e.target.value)} /></Field>
@@ -1818,7 +1884,7 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
   const [scope, setScope] = useState("mine"); // staff: mine | assigned
   const list = useMemo(() => {
     let r = [...db.tasks].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : (t.assignedTo === currentUser || t.assignedTo === COMBINED));
+    if (!isAdmin) r = r.filter((t) => scope === "assigned" ? t.assignedBy === currentUser : taskAssignees(t).includes(currentUser));
     if (filter === "active") r = r.filter((t) => t.status !== "Completed");
     else if (filter === "progress") r = r.filter((t) => t.status === "In Progress");
     else if (filter === "done") r = r.filter((t) => t.status === "Completed");
@@ -1875,9 +1941,9 @@ function Tasks({ db, mutate, openModal, isAdmin = true, currentUser, openTask, r
                 </div>
                 {t.desc && <div className="item-meta" style={{ marginTop: 6 }}>{t.desc.length > 140 ? t.desc.slice(0, 140) + "…" : t.desc}</div>}
                 <div className="item-meta" style={{ marginTop: 6 }}>
-                  <span>{t.assignedBy} → <b style={{ color: t.assignedTo === COMBINED ? "var(--ink)" : avatarColor(t.assignedTo) }}>{t.assignedTo}</b></span>
+                  <span>{t.assignedBy} → <b style={{ color: isMultiAssignee(t) ? "var(--ink)" : avatarColor(taskAssignees(t)[0]) }}>{assigneeText(t)}</b></span>
                   {t.due && <span><CalendarClock size={12} style={{ verticalAlign: -2 }} /> {fmtDate(t.due)}</span>}
-                  {!canAct && t.status !== "Completed" && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><ShieldCheck size={11} />{isAdmin ? "Monitor only — " : ""}{t.assignedTo} controls status</span>}
+                  {!canAct && t.status !== "Completed" && <span className="hint-line" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><ShieldCheck size={11} />{isAdmin ? "Monitor only — " : ""}{isMultiAssignee(t) ? "assignees control status" : `${assigneeText(t)} controls status`}</span>}
                 </div>
               </div>
               <div className="row-actions">
@@ -1915,13 +1981,13 @@ function Progress({ db, mutate, isAdmin = true, currentUser, openTask }) {
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <div className="item-main">
                   {openTask ? <button className="ttl-link" onClick={() => openTask(t.id)}>{t.title}</button> : <div className="item-title">{t.title}</div>}
-                  <div className="item-meta"><span style={{ color: t.assignedTo === COMBINED ? "var(--ink)" : avatarColor(t.assignedTo) }}>{t.assignedTo}</span>{t.due && <span>Due {fmtDate(t.due)}</span>}<span className={"badge " + priorityTone(t.priority)}>{t.priority}</span></div></div>
+                  <div className="item-meta"><span style={{ color: isMultiAssignee(t) ? "var(--ink)" : avatarColor(taskAssignees(t)[0]) }}>{assigneeText(t)}</span>{t.due && <span>Due {fmtDate(t.due)}</span>}<span className={"badge " + priorityTone(t.priority)}>{t.priority}</span></div></div>
                 <div className="mono" style={{ fontWeight: 700, fontSize: 18 }}>{t.progress || 0}%</div>
               </div>
               <div className="progress-track"><div className="progress-fill" style={{ width: `${t.progress || 0}%` }} /></div>
               {canAct
                 ? <input type="range" min="0" max="100" step="5" value={t.progress || 0} onChange={(e) => setProgress(t, Number(e.target.value))} style={{ accentColor: "var(--primary)" }} />
-                : <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 5 }}><ShieldCheck size={12} />Monitoring {t.assignedTo}'s progress — only they can update it</div>}
+                : <div className="hint-line" style={{ display: "flex", alignItems: "center", gap: 5 }}><ShieldCheck size={12} />Monitoring {assigneeText(t)} — only they can update progress</div>}
             </div>
           );
         })}
@@ -1985,7 +2051,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
   const colorFor = (n) => (n === COMBINED ? "var(--ink)" : avatarColor(n));
   const META = [
     ["Assigned by", <span style={{ color: colorFor(t.assignedBy), fontWeight: 600 }}>{t.assignedBy}</span>],
-    ["Assigned to", <span style={{ color: colorFor(t.assignedTo), fontWeight: 600 }}>{t.assignedTo}</span>],
+    ["Assigned to", <span style={{ color: isMultiAssignee(t) ? "var(--ink)" : colorFor(taskAssignees(t)[0]), fontWeight: 600 }}>{assigneeText(t)}</span>],
     ["Due date", t.due ? fmtDate(t.due) : "—"],
     ["Priority", t.priority || "—"],
     ["Status", t.status],
@@ -2014,7 +2080,7 @@ function TaskDetail({ db, taskId, me, isAdmin, currentUser, mutate, openModal, r
 
       {!canAct && t.status !== "Completed" && (
         <div className="hint-line" style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 5 }}>
-          <ShieldCheck size={12} />{isAdmin ? "You can monitor and edit this task, but " : ""}only {t.assignedTo} can accept, start or complete it.
+          <ShieldCheck size={12} />{isAdmin ? "You can monitor and edit this task, but " : ""}only {isMultiAssignee(t) ? "the assignees" : assigneeText(t)} can accept, start or complete it.
         </div>
       )}
 
@@ -2417,7 +2483,7 @@ function StaffDashboard({ db, me, go, mutate, openModal, team = [] }) {
   const openSess = todays.find((a) => !a.checkOut);
   const todayH = sumHours(todays);
   const leaveToday = onApprovedLeave(db, me.id, today);
-  const myOpen = db.tasks.filter((t) => t.assignedTo === me.name && t.status !== "Completed");
+  const myOpen = db.tasks.filter((t) => taskAssignees(t).includes(me.name) && t.status !== "Completed");
   const myPendingLeave = db.leave.filter((l) => l.userId === me.id && l.status === "Pending");
   const myUpdatesToday = db.updates.filter((u) => u.userId === me.id && u.date === today);
   const hr = new Date().getHours();
@@ -3159,7 +3225,7 @@ const NAV = [
   ["announcements", "Announcements", MegaphoneIcon, "collab"],
   ["documents", "Documents", Paperclip, "collab"],
   ["knowledge", "Knowledge base", BookOpen, "collab"],
-  ["prompts", "Prompts", Sparkles, "collab"],
+  ["prompts", "Prompts", Sparkles, "perm:prompts"],
   ["sheets", "Sheets", Sheet, "perm:sheets"],
   ["terms", "Terms & conditions", BadgeCheck, "everyone"],
   ["performance", "Performance", TrendingUp, "insight"],
@@ -3894,7 +3960,7 @@ function Leads({ db, mutate, openModal, removeItem, isAdmin }) {
   );
 }
 
-function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me }) {
+function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me, portalClients = [], deleteClientAccount }) {
   const [q, setQ] = useState("");
   const [n, setN] = useState(25);
   const all = [...db.clients].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
@@ -3902,6 +3968,15 @@ function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me }) {
   const list = q.trim() ? scoped.filter((c) => (c.name + " " + (c.company || "") + " " + (c.phone || "") + " " + (c.email || "")).toLowerCase().includes(q.toLowerCase())) : scoped;
   const del = (c) => removeItem("clients", c, { name: c.name, audit: `removed client "${c.name}"` });
   const quote = (c) => openModal({ type: "quotation", initial: { client: c.name } });
+  // Registered clients = people who signed up themselves from the login screen
+  // (choose "Client"). Newest first.
+  const registered = [...portalClients].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  const removeAccount = (p) => openModal({
+    type: "deleteConfirm", title: "Delete client account?",
+    body: `Permanently remove ${p.name}'s portal account?`,
+    note: "They're removed from the team and can't sign back in. This can't be undone here.",
+    onConfirm: () => deleteClientAccount && deleteClientAccount(p),
+  });
   return (
     <div className="content">
       <div className="page-head"><h3>Clients</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "client" })}><Plus size={16} />New client</button></div>
@@ -3924,6 +3999,31 @@ function Clients({ db, mutate, openModal, removeItem, isAdmin = true, me }) {
             ))}</tbody>
           </table></div>}
         <LoadMore shown={Math.min(n, list.length)} total={list.length} onMore={() => setN((x) => x + 25)} />
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div style={{ padding: "15px 18px", borderBottom: "1px solid var(--border)", fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+          <ExternalLink size={15} /> Registered clients
+          {registered.length > 0 && <span className="badge" style={{ marginLeft: 2 }}>{registered.length}</span>}
+        </div>
+        {registered.length === 0
+          ? <Empty icon={<ExternalLink size={22} color="var(--muted)" />} title="No registered clients yet" text="When someone signs up from the login screen and chooses “Client”, their account shows up here." />
+          : <div style={{ overflowX: "auto" }}><table className="tbl">
+            <thead><tr><th>Client</th><th>Contact</th><th>Joined</th><th>Status</th>{isAdmin && <th></th>}</tr></thead>
+            <tbody>{registered.map((p) => (
+              <tr key={p.id}>
+                <td><span className="who-cell"><span className="avatar" style={{ background: avatarColor(p.name), width: 24, height: 24, fontSize: 10 }}>{(p.name || "?")[0]}</span>{p.name}</span></td>
+                <td>{p.email && <div style={{ fontSize: 13 }}>{p.email}</div>}{p.mobile && <div className="hint-line" style={{ fontSize: 11 }}>{p.mobile}</div>}{!p.email && !p.mobile && "—"}</td>
+                <td className="mono" style={{ whiteSpace: "nowrap", color: "var(--muted)", fontSize: 13 }}>{p.created_at ? fmtDate(p.created_at) : "—"}</td>
+                <td>{p.approved === false
+                  ? <span className="badge pri" style={{ fontSize: 10 }}>Pending approval</span>
+                  : <span className={"badge " + (p.active === false ? "neg" : "pos")} style={{ fontSize: 10 }}>{p.active === false ? "Inactive" : "Active"}</span>}</td>
+                {isAdmin && <td><div className="row-actions">
+                  <button className="iconbtn" style={{ width: 30, height: 30 }} title="Delete client account" onClick={() => removeAccount(p)}><Trash2 size={14} /></button>
+                </div></td>}
+              </tr>
+            ))}</tbody>
+          </table></div>}
       </div>
     </div>
   );
@@ -4251,8 +4351,8 @@ function Performance({ db, team }) {
   const month = new Date();
   const staff = (team || []).filter((p) => ["staff", "intern", "admin", "accountant"].includes(p.role) && p.active !== false);
   const rows = staff.map((p) => {
-    const done = db.tasks.filter((t) => t.assignedTo === p.name && t.status === "Completed").length;
-    const open = db.tasks.filter((t) => t.assignedTo === p.name && t.status !== "Completed").length;
+    const done = db.tasks.filter((t) => taskAssignees(t).includes(p.name) && t.status === "Completed").length;
+    const open = db.tasks.filter((t) => taskAssignees(t).includes(p.name) && t.status !== "Completed").length;
     const myLeads = db.leads.filter((l) => l.ownerId === p.id || l.leadOwner === p.name);
     const leadsGen = myLeads.length;
     const leadsWon = myLeads.filter((l) => l.stage === "Converted").length;
@@ -4874,7 +4974,7 @@ export default function App() {
       if (!prev) return prev;
       let next = updater(prev);
       if (audit) next = { ...next, audit: [...next.audit, { id: uid(), ts: Date.now(), user: currentUser || "—", ...audit }] };
-      applyDiff(prev, next).catch((e) => setSyncError(e.message || String(e)));
+      persistWithRetry(prev, next).catch((e) => setSyncError(e.message || String(e)));
       return next;
     });
   }, [currentUser]);
@@ -4920,7 +5020,7 @@ export default function App() {
       const keep = prev.recycle.filter((r) => (r.deletedAt || 0) >= cutoff);
       if (keep.length === prev.recycle.length) return prev;
       const next = { ...prev, recycle: keep };
-      applyDiff(prev, next).catch((e) => setSyncError(e.message || String(e)));
+      persistWithRetry(prev, next).catch((e) => setSyncError(e.message || String(e)));
       return next;
     });
   }, []);
@@ -4938,6 +5038,24 @@ export default function App() {
   const changeProfile = useCallback(async (id, patch) => {
     try { await updateProfile(id, patch); if (session) await loadPeople(session.user); }
     catch (e) { setSyncError(e.message || String(e)); }
+  }, [session, loadPeople]);
+
+  // Permanently remove a registered client (a self-signed-up portal account).
+  // Same approach as Manage user: delete the profile row (frees the email), then
+  // best-effort delete their login via the admin-users edge function if deployed.
+  const deleteClientAccount = useCallback(async (person) => {
+    if (!person || person.role !== "client") return;
+    try {
+      const { error } = await supabase.from("profiles").delete().eq("id", person.id);
+      if (error) throw error;
+    } catch (e) {
+      setSyncError(/(permission|denied|policy|row-level)/i.test((e && e.message) || "")
+        ? "The database is blocking the delete. Run allbee-delete-user.sql once, then try again."
+        : ("Couldn't remove the client: " + ((e && e.message) || "unknown error")));
+      return;
+    }
+    try { await supabase.functions.invoke("admin-users", { body: { action: "delete", userId: person.id } }); } catch { /* edge function optional — profile already removed */ }
+    if (session) await loadPeople(session.user);
   }, [session, loadPeople]);
 
   // first-login profile completion + T&C acceptance (both write to my own row)
@@ -5100,7 +5218,7 @@ export default function App() {
     return <TermsGate agreements={tncPending} onAccept={acceptTnc} onSignOut={signOut} isDark={isDark} />;
   if (loading || !db) return <Loading />;
 
-  const teamNames = team.length ? team.map((p) => p.name) : USERS;
+  const teamNames = team.length ? team.filter((p) => p.role !== "client" && p.active !== false).map((p) => p.name) : USERS;
   const visibleNav = NAV.filter((n) => navAllowed(n[3], role, profile?.perms || {}));
   const allowedRoutes = new Set(visibleNav.map((n) => n[0]));
   const safeRoute = allowedRoutes.has(route) ? route : "dashboard";
@@ -5109,7 +5227,7 @@ export default function App() {
     accountUser && canFinance ? `${accountUser} — account` :
     taskDetailId ? (detailTask ? detailTask.title : "Task") :
     NAV.find((n) => n[0] === safeRoute)?.[1] || "";
-  const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || t.assignedTo === currentUser)).length;
+  const myPending = db.tasks.filter((t) => t.status !== "Completed" && (isAdmin || taskAssignees(t).includes(currentUser))).length;
   const pendingLeave = isAdmin ? db.leave.filter((l) => l.status === "Pending").length : 0;
   const unreadNotifs = db.notifications.filter((n) => notifVisibleTo(n, profile) && !(n.reads || []).includes(me.id)).length;
   const unreadChat = db.chat.filter((m) => m.userId !== me.id && !m.deleted && !(m.seenBy || []).includes(me.id)).length;
@@ -5139,7 +5257,7 @@ export default function App() {
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} me={me} />;
       case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
-      case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} />;
+      case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} portalClients={portalClients} deleteClientAccount={deleteClientAccount} />;
       case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} currentUser={currentUser} isAdmin={isAdmin} />;
       case "invoices": return <Invoices db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
       case "portal-posts": return <PortalPosts db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} portalClients={portalClients} />;
