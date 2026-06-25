@@ -84,6 +84,7 @@ const MODULE_LABEL = {
   prompts: "Prompts",
   sheets: "Sheets",
   inhouse: "In-house projects",
+  teams: "Team leads",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -136,6 +137,7 @@ function navAllowed(tag, role, perms) {
   if (tag === "admin") return adm;                    // team, progress, recycle, audit, settings
   if (tag === "collab") return true;                  // announcements, chat, docs, knowledge (any internal user)
   if (tag === "vault") return sa;                     // password vault (partners only for now)
+  if (tag === "super") return sa;                     // superadmin-only (e.g. Team leads)
   if (tag === "insight") return adm;                  // performance, rewards
   if (tag.startsWith("perm:")) {
     const mod = tag.slice(5);
@@ -204,7 +206,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts", "sheets", "inhouse", "payroll"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts", "sheets", "inhouse", "payroll", "teams", "team_chat"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -364,6 +366,14 @@ const onApprovedLeave = (db, userId, dateISO) =>
   db.leave.some((l) => l.userId === userId && l.status === "Approved" && dateISO >= l.fromDate && dateISO <= l.toDate);
 const attendanceFor = (db, userId, dateISO) => db.attendance.find((a) => a.userId === userId && a.date === dateISO) || null;
 
+/* ── teams (team lead → members) ──────────────────────────────────────────
+   A team is { id, name, leadId, leadName, memberIds[] }. A person belongs to
+   the team they lead or are a member of. The lead is always counted in the
+   roster. Stored in the `teams` table; team-scoped chat lives in `team_chat`. */
+const teamOfUser = (teams, userId) => (teams || []).find((t) => t.leadId === userId || (t.memberIds || []).includes(userId)) || null;
+const isTeamLead = (teams, userId) => (teams || []).some((t) => t.leadId === userId);
+const teamRosterIds = (t) => (t ? Array.from(new Set([t.leadId, ...(t.memberIds || [])].filter(Boolean))) : []);
+
 const emptyDB = () => ({
   version: 3,
   transactions: [], withdrawals: [], tasks: [], projects: [],
@@ -373,7 +383,7 @@ const emptyDB = () => ({
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
   notifications: [], invoices: [], resignations: [], prompts: [], sheets: [],
-  inhouse: [], payroll: [],
+  inhouse: [], payroll: [], teams: [], team_chat: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -610,7 +620,9 @@ const CSS = `
 .iconbtn { width:36px; height:36px; border-radius:9px; border:1px solid var(--border); background:var(--surface);
   display:grid; place-items:center; cursor:pointer; color:var(--ink); transition:.12s; }
 .iconbtn:hover { background:var(--surface-2); }
-.usermenu { position:relative; }
+.usermenu { position:relative; display:flex; align-items:center; gap:4px; flex-shrink:0; }
+.topbar-title { flex:1; min-width:0; }
+.topbar-title h2 { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .userchip { display:flex; align-items:center; gap:8px; border:1px solid var(--border); background:var(--surface);
   border-radius:9px; padding:5px 10px 5px 6px; cursor:pointer; font-weight:600; font-size:13px; }
 .avatar { width:26px; height:26px; border-radius:50%; display:grid; place-items:center; color:#fff; font-size:12px; font-weight:700; }
@@ -771,14 +783,14 @@ table.tbl tr:hover td { background:var(--surface-2); }
   .content { padding:16px; }
   .grid2 { grid-template-columns:1fr; }
   .company-pill .lbl { display:none; }
-  .topbar { padding:12px 14px; gap:10px; }
-  .topbar h2 { font-size:16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .topbar { padding:9px 14px; gap:10px; }
+  .topbar h2 { font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .topbar > div:nth-child(2) { min-width:0; }
-  .company-pill { padding:6px 10px; }
+  .company-pill { padding:5px 9px; }
   .company-pill .val { font-size:14px; }
 }
 @media (max-width:560px) {
-  .topbar { gap:8px; padding:11px 12px; }
+  .topbar { gap:8px; padding:9px 12px; }
   .topbar-sub { display:none; }
   .userchip-name { display:none; }
   .userchip .role-badge { display:none; }
@@ -3380,6 +3392,8 @@ const NAV = [
   ["rewards", "Rewards", Award, "collab"],
   ["earnings", "My earnings", Coins, "everyone"],
   ["team", "Team", Users, "admin"],
+  ["team-leads", "Team leads", ShieldCheck, "super"],
+  ["myteam", "My team", Users, "everyone"],
   ["staff-salary", "Staff salary", Banknote, "admin"],
   ["progress", "Progress", Activity, "work"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
@@ -5229,6 +5243,259 @@ function MyEarnings({ db, me, role, payroll, profile, go }) {
   );
 }
 
+/* ── Team leads: superadmin sets a lead + their members ─────────────────── */
+function TeamConfigForm({ initial, roster, onSave, onClose }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [leadId, setLeadId] = useState(initial?.leadId || "");
+  const [memberIds, setMemberIds] = useState(initial?.memberIds || []);
+  const [err, setErr] = useState("");
+  const toggle = (id) => setMemberIds((m) => m.includes(id) ? m.filter((x) => x !== id) : [...m, id]);
+  const candidates = roster.filter((p) => p.id !== leadId);
+  const save = () => {
+    if (!name.trim()) { setErr("Give the team a name."); return; }
+    if (!leadId) { setErr("Choose a team lead."); return; }
+    const lead = roster.find((p) => p.id === leadId);
+    onSave({ id: initial?.id || uid(), name: name.trim(), leadId, leadName: lead?.name || "", memberIds: memberIds.filter((id) => id !== leadId), createdAt: initial?.createdAt || Date.now(), updatedAt: Date.now() });
+  };
+  return (
+    <Modal title={initial?.id ? "Edit team" : "New team"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save}><Check size={16} />Save team</button></>}>
+      {err && <div className="auth-msg err" style={{ marginBottom: 10 }}><AlertTriangle size={14} /> {err}</div>}
+      <div className="grid2">
+        <Field label="Team name" required><input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Development squad" /></Field>
+        <Field label="Team lead" required><select className="select" value={leadId} onChange={(e) => setLeadId(e.target.value)}><option value="">Choose…</option>{roster.map((p) => <option key={p.id} value={p.id}>{p.name} · {ROLE_LABEL[p.role] || p.role}</option>)}</select></Field>
+      </div>
+      <Field label={`Members${memberIds.length ? ` · ${memberIds.length} selected` : ""}`} hint="Tick everyone who reports to this lead. The lead is included automatically.">
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(180px,1fr))", gap: 8, maxHeight: 280, overflowY: "auto" }}>
+          {candidates.length === 0 ? <div className="hint-line">No other members available.</div> : candidates.map((p) => {
+            const on = memberIds.includes(p.id);
+            return (
+              <button key={p.id} type="button" onClick={() => toggle(p.id)} className="card" style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", cursor: "pointer", textAlign: "left", border: on ? "1px solid var(--primary)" : "1px solid var(--border)", background: on ? "var(--primary-soft)" : "var(--surface)" }}>
+                <Avatar name={p.name} url={p.photo_url} size={26} />
+                <span style={{ minWidth: 0, flex: 1 }}><div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[p.role] || p.role}</div></span>
+                {on && <Check size={15} color="var(--primary)" />}
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+    </Modal>
+  );
+}
+
+function TeamLeads({ team, db, openModal, removeItem, me }) {
+  const teams = [...(db.teams || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const roster = team.filter((p) => p.role !== "client" && p.active !== false);
+  const byId = (id) => team.find((p) => p.id === id);
+  const del = (t) => removeItem("teams", t, { name: t.name, audit: `deleted team "${t.name}"` });
+  const assigned = new Set(teams.flatMap((t) => teamRosterIds(t)));
+  const unassigned = roster.filter((p) => !assigned.has(p.id) && p.role !== "superadmin");
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Team leads</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "teamcfg" })}><Plus size={16} />New team</button></div>
+      <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginBottom: 14 }}><ShieldCheck size={15} /> Group people under a team lead. Leads (and their members) get a My team screen with the team's attendance, tasks, performance and a private team chat.</div>
+      {teams.length === 0 ? <div className="card"><Empty icon={<Users size={22} color="var(--muted)" />} title="No teams yet" text="Create a team, pick a lead, and assign the members who report to them." action={<button className="btn primary" onClick={() => openModal({ type: "teamcfg" })}><Plus size={16} />New team</button>} /></div>
+        : <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
+          {teams.map((t) => {
+            const members = (t.memberIds || []).map(byId).filter(Boolean);
+            const lead = byId(t.leadId);
+            return (
+              <div key={t.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{t.name}</div><div className="sub">{members.length + 1} member{members.length ? "s" : ""}</div></div>
+                  <div className="row-actions">
+                    <button className="iconbtn" style={{ width: 30, height: 30 }} title="Edit" onClick={() => openModal({ type: "teamcfg", initial: t })}><Pencil size={14} /></button>
+                    <button className="iconbtn" style={{ width: 30, height: 30 }} title="Delete" onClick={() => openModal({ type: "deleteConfirm", title: "Delete team?", body: `Delete "${t.name}"?`, note: "Members keep their accounts — only the grouping is removed.", onConfirm: () => del(t) })}><Trash2 size={14} /></button>
+                  </div>
+                </div>
+                <div>
+                  <div className="hint-line" style={{ marginBottom: 6 }}>Team lead</div>
+                  <span className="who-cell"><Avatar name={lead?.name || "?"} url={lead?.photo_url} size={28} /><span><div style={{ fontWeight: 600 }}>{lead?.name || "—"} <span className="badge accent" style={{ marginLeft: 4 }}>Lead</span></div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[lead?.role] || ""}</div></span></span>
+                </div>
+                <div>
+                  <div className="hint-line" style={{ marginBottom: 6 }}>Members</div>
+                  {members.length === 0 ? <div className="hint-line">No members yet.</div>
+                    : <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{members.map((m) => <span key={m.id} className="who-cell" style={{ background: "var(--surface-2)", borderRadius: 999, padding: "3px 10px 3px 3px" }}><Avatar name={m.name} url={m.photo_url} size={22} /><span style={{ fontSize: 12.5, fontWeight: 600 }}>{m.name}</span></span>)}</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>}
+      {unassigned.length > 0 && (
+        <div className="card" style={{ marginTop: 16 }}>
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", fontWeight: 700, fontSize: 13 }}>Not on a team yet ({unassigned.length})</div>
+          <div style={{ padding: "12px 16px", display: "flex", flexWrap: "wrap", gap: 8 }}>{unassigned.map((p) => <span key={p.id} className="who-cell"><Avatar name={p.name} url={p.photo_url} size={22} /><span style={{ fontSize: 12.5 }}>{p.name}</span></span>)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Team-scoped chat (private to one team) ────────────────────────────── */
+function TeamChat({ db, mutate, me, members, teamId, onRefresh }) {
+  const [text, setText] = useState("");
+  const endRef = useRef(null);
+  const list = [...(db.team_chat || [])].filter((m) => m.teamId === teamId && !m.deleted).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [list.length]);
+  useEffect(() => {
+    if (!onRefresh) return;
+    const t = setInterval(() => { if (typeof document === "undefined" || document.visibilityState === "visible") onRefresh(); }, 12000);
+    return () => clearInterval(t);
+  }, [onRefresh]);
+  useEffect(() => {
+    const unseen = (db.team_chat || []).filter((m) => m.teamId === teamId && m.userId !== me.id && !m.deleted && !(m.seenBy || []).includes(me.id));
+    if (!unseen.length) return;
+    const ids = new Set(unseen.map((m) => m.id));
+    mutate((d) => ({ ...d, team_chat: d.team_chat.map((m) => ids.has(m.id) ? { ...m, seenBy: Array.from(new Set([...(m.seenBy || []), me.id])) } : m) }), null);
+  }, [db.team_chat, me.id, teamId, mutate]);
+  const send = () => {
+    const t = text.trim(); if (!t) return;
+    setText("");
+    mutate((d) => ({ ...d, team_chat: [...(d.team_chat || []), { id: uid(), teamId, userId: me.id, userName: me.name, text: t, createdAt: Date.now() }] }), null);
+  };
+  const del = (m) => { if (!window.confirm("Delete your message for the team?")) return; mutate((d) => ({ ...d, team_chat: d.team_chat.map((x) => x.id === m.id ? { ...x, deleted: true, text: "", deletedBy: me.name } : x) }), null); };
+  const photo = (id) => members.find((p) => p.id === id)?.photo_url;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 260px)", minHeight: 360 }}>
+      <div className="card" style={{ flex: 1, overflowY: "auto", padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        {list.length === 0 ? <Empty icon={<Send size={22} color="var(--muted)" />} title="No messages yet" text="This chat is private to your team." />
+          : list.map((m) => {
+            const mine = m.userId === me.id;
+            return (
+              <div key={m.id} style={{ display: "flex", gap: 10, flexDirection: mine ? "row-reverse" : "row" }}>
+                <div style={{ flex: "none" }}><Avatar name={m.userName} url={photo(m.userId)} size={30} /></div>
+                <div style={{ maxWidth: "72%" }}>
+                  <div style={{ background: mine ? "var(--primary)" : "var(--surface-2)", color: mine ? "#fff" : "var(--ink)", padding: "9px 13px", borderRadius: 12, fontSize: 14, lineHeight: 1.45, whiteSpace: "pre-wrap" }}>{m.text}</div>
+                  <div className="hint-line" style={{ fontSize: 11, marginTop: 3, textAlign: mine ? "right" : "left" }}>{mine ? "You" : m.userName} · {fmtDateTime(m.createdAt)}{mine && <button onClick={() => del(m)} style={{ marginLeft: 6, background: "none", border: "none", color: "var(--neg)", cursor: "pointer", font: "inherit", padding: 0, textDecoration: "underline" }}>Delete</button>}</div>
+                </div>
+              </div>
+            );
+          })}
+        <div ref={endRef} />
+      </div>
+      <div className="composer" style={{ marginTop: 12 }}>
+        <textarea className="textarea" style={{ minHeight: 44 }} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Message your team… (Enter to send)" />
+        <button className="btn primary" onClick={send} disabled={!text.trim()}><Send size={16} />Send</button>
+      </div>
+    </div>
+  );
+}
+
+function MyTeam({ db, team, me, mutate, onRefresh }) {
+  const [tab, setTab] = useState("overview");
+  const [date, setDate] = useState(todayISO());
+  const myTeam = teamOfUser(db.teams, me.id);
+  if (!myTeam) {
+    return (
+      <div className="content">
+        <div className="page-head"><h3>My team</h3></div>
+        <div className="card"><Empty icon={<Users size={22} color="var(--muted)" />} title="You're not on a team yet" text="Once a super admin adds you to a team, you'll see your teammates' attendance, tasks and a private team chat here." /></div>
+      </div>
+    );
+  }
+  const amLead = myTeam.leadId === me.id;
+  const members = teamRosterIds(myTeam).map((id) => team.find((p) => p.id === id)).filter(Boolean);
+  const month = new Date();
+  const memberStats = (p) => {
+    const open = db.tasks.filter((t) => taskAssignees(t).includes(p.name) && t.status !== "Completed").length;
+    const done = db.tasks.filter((t) => taskAssignees(t).includes(p.name) && t.status === "Completed").length;
+    const presentDays = new Set(db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month)).map((a) => a.date)).size;
+    const hours = round2(sumHours(db.attendance.filter((a) => a.userId === p.id && sameMonth(a.date, month))));
+    return { open, done, presentDays, hours };
+  };
+  const teamTasks = db.tasks
+    .filter((t) => members.some((p) => taskAssignees(t).includes(p.name)))
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const TABS = [["overview", "Overview"], ["attendance", "Attendance"], ["tasks", "Tasks"], ["chat", "Team chat"]];
+  return (
+    <div className="content">
+      <div className="page-head">
+        <h3>{myTeam.name}</h3>
+        <span className="badge accent">{amLead ? "You lead this team" : "Member"}</span>
+        <span className="spacer" />
+        <span className="hint-line">{members.length} member{members.length !== 1 ? "s" : ""}</span>
+      </div>
+      <div className="toolbar"><div className="seg">{TABS.map(([k, l]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}</div></div>
+
+      {tab === "overview" && (
+        <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))" }}>
+          {members.map((p) => {
+            const s = memberStats(p);
+            const att = attStatus(db, p.id, todayISO());
+            return (
+              <div key={p.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div className="who-cell">
+                  <Avatar name={p.name} url={p.photo_url} size={32} />
+                  <span style={{ flex: 1 }}><div style={{ fontWeight: 700 }}>{p.name}{p.id === myTeam.leadId ? <span className="badge accent" style={{ marginLeft: 6 }}>Lead</span> : ""}</div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[p.role] || p.role}</div></span>
+                  <span className={"badge " + att.tone}>{att.label}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
+                  <div style={{ background: "var(--surface-2)", borderRadius: 9, padding: "8px 10px" }}><div className="hint-line" style={{ fontSize: 11 }}>Open tasks</div><div className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{s.open}</div></div>
+                  <div style={{ background: "var(--surface-2)", borderRadius: 9, padding: "8px 10px" }}><div className="hint-line" style={{ fontSize: 11 }}>Completed</div><div className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{s.done}</div></div>
+                  <div style={{ background: "var(--surface-2)", borderRadius: 9, padding: "8px 10px" }}><div className="hint-line" style={{ fontSize: 11 }}>Days present</div><div className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{s.presentDays}</div></div>
+                  <div style={{ background: "var(--surface-2)", borderRadius: 9, padding: "8px 10px" }}><div className="hint-line" style={{ fontSize: 11 }}>Hours (mo)</div><div className="mono" style={{ fontWeight: 700, fontSize: 16 }}>{s.hours}</div></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {tab === "attendance" && (
+        <div className="card">
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontWeight: 700, fontSize: 14 }}>Attendance</span>
+            <input className="input" type="date" value={date} max={todayISO()} onChange={(e) => setDate(e.target.value)} style={{ width: "auto" }} />
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl">
+              <thead><tr><th>Member</th><th>{fmtDate(date)}</th><th>Check in</th><th>Check out</th><th className="num-cell">Days this month</th></tr></thead>
+              <tbody>{members.map((p) => {
+                const st = attStatus(db, p.id, date);
+                const a = attendanceFor(db, p.id, date);
+                const presentDays = new Set(db.attendance.filter((x) => x.userId === p.id && sameMonth(x.date, month)).map((x) => x.date)).size;
+                return (
+                  <tr key={p.id}>
+                    <td><span className="who-cell"><Avatar name={p.name} url={p.photo_url} size={26} /><span style={{ fontWeight: 600 }}>{p.name}</span></span></td>
+                    <td><span className={"badge " + st.tone}>{st.label}</span></td>
+                    <td className="mono">{a ? clockTime(a.checkIn) : "—"}</td>
+                    <td className="mono">{a && a.checkOut ? clockTime(a.checkOut) : "—"}</td>
+                    <td className="num-cell mono">{presentDays}</td>
+                  </tr>
+                );
+              })}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "tasks" && (
+        <div className="card">
+          {teamTasks.length === 0 ? <Empty icon={<ListTodo size={22} color="var(--muted)" />} title="No tasks for the team yet" text="Tasks assigned to anyone on the team show up here." />
+            : teamTasks.map((t) => (
+              <div key={t.id} className="item-row">
+                <div className="item-main">
+                  <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+                    {t.num != null && <span className="badge mono" style={{ fontWeight: 700 }}>#{t.num}</span>}
+                    <span className="item-title">{t.title}</span>
+                    <span className={"badge " + (t.status === "Completed" ? "pos" : t.status === "In Progress" ? "accent" : "pri")}>{t.status}</span>
+                    {t.priority && <span className={"badge " + priorityTone(t.priority)}>{t.priority}</span>}
+                  </div>
+                  <div className="item-meta" style={{ marginTop: 6 }}>
+                    <span>{t.assignedBy} → <b>{assigneeText(t)}</b></span>
+                    {t.due && <span><CalendarClock size={12} style={{ verticalAlign: -2 }} /> {fmtDate(t.due)}</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {tab === "chat" && <TeamChat db={db} mutate={mutate} me={me} members={members} teamId={myTeam.id} onRefresh={onRefresh} />}
+    </div>
+  );
+}
+
 export default function App() {
   const [db, setDb] = useState(null);
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
@@ -5577,6 +5844,14 @@ export default function App() {
     setModal(null);
   };
 
+  // Create / update a team (super admin). Stored in the `teams` table.
+  const saveTeamCfg = (t) => {
+    const isUpdate = (db.teams || []).some((x) => x.id === t.id);
+    mutate((d) => ({ ...d, teams: isUpdate ? d.teams.map((x) => x.id === t.id ? t : x) : [...(d.teams || []), t] }),
+      { action: `${isUpdate ? "updated" : "created"} team "${t.name}"`, module: "Team leads" });
+    setModal(null);
+  };
+
   const Loading = ({ note }) => (
     <div className="allbee" data-theme={isDark ? "dark" : "light"} style={{ display: "grid", placeItems: "center", minHeight: "100vh" }}>
       <style>{CSS}</style>
@@ -5610,7 +5885,9 @@ export default function App() {
   if (loading || !db) return <Loading />;
 
   const teamNames = team.length ? team.filter((p) => p.role !== "client" && p.active !== false).map((p) => p.name) : USERS;
-  const visibleNav = NAV.filter((n) => navAllowed(n[3], role, profile?.perms || {}));
+  const myTeam = teamOfUser(db?.teams, me.id);
+  const visibleNav = NAV.filter((n) => navAllowed(n[3], role, profile?.perms || {}))
+    .filter((n) => n[0] !== "myteam" || !!myTeam);
   const allowedRoutes = new Set(visibleNav.map((n) => n[0]));
   const safeRoute = allowedRoutes.has(route) ? route : "dashboard";
   const detailTask = taskDetailId ? db.tasks.find((t) => t.id === taskDetailId) : null;
@@ -5640,6 +5917,8 @@ export default function App() {
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} removeItem={removeItem} openModal={openModal} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} db={db} resolveResign={resolveResign} />;
+      case "team-leads": return <TeamLeads team={team} db={db} openModal={openModal} removeItem={removeItem} me={me} />;
+      case "myteam": return <MyTeam db={db} team={team} me={me} mutate={mutate} onRefresh={reload} />;
       case "staff-salary": return <StaffSalary db={db} team={team} mutate={mutate} me={me} />;
       case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} locks={locks} lockPeriod={lockPeriod} unlockPeriod={unlockPeriod} isSuper={isSuper} currentUser={currentUser} />;
       case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} isSuper={isSuper} currentUser={currentUser} />;
@@ -5745,7 +6024,7 @@ export default function App() {
           <div className="main">
             <header className="topbar">
               <button className="iconbtn hamburger" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu"><Menu size={18} /></button>
-              <div><h2>{routeTitle}</h2><div className="topbar-sub">ALLBEE Solutions · internal</div></div>
+              <div className="topbar-title"><h2>{routeTitle}</h2><div className="topbar-sub">ALLBEE Solutions · internal</div></div>
               {canFinance && (
                 <div className="company-pill" title="Company balance">
                   <Wallet size={14} color="var(--muted)" />
@@ -5754,11 +6033,11 @@ export default function App() {
                 </div>
               )}
               <div className="usermenu">
-                <button className="iconbtn" title="Refresh" style={{ marginRight: 4 }} disabled={topBusy}
+                <button className="iconbtn" title="Refresh" disabled={topBusy}
                   onClick={async () => { setTopBusy(true); try { await reload(); if (session) await loadPeople(session.user); } finally { setTimeout(() => setTopBusy(false), 400); } }}>
                   <RefreshCw size={18} className={topBusy ? "spin" : ""} />
                 </button>
-                <button className="iconbtn" title="Announcements" style={{ position: "relative", marginRight: 4 }}
+                <button className="iconbtn" title="Announcements" style={{ position: "relative" }}
                   onClick={() => { go("announcements"); if (me.id) changeProfile(me.id, { notif_seen_at: new Date().toISOString() }); }}>
                   <Bell size={18} />
                   {unseenAnn > 0 && <span className="badge pri" style={{ position: "absolute", top: -5, right: -5, minWidth: 16, height: 16, padding: "0 4px", fontSize: 10, lineHeight: "16px" }}>{unseenAnn}</span>}
@@ -5792,6 +6071,7 @@ export default function App() {
         {modal?.type === "leave" && <LeaveForm initial={modal.initial} me={me} onSave={(l) => mutate((d) => ({ ...d, leave: d.leave.some((x) => x.id === l.id) ? d.leave.map((x) => x.id === l.id ? l : x) : [...d.leave, l] }), { action: (db.leave.some((x) => x.id === l.id) ? "updated " : "submitted ") + l.type + " leave request", module: "Leave" })} onClose={() => setModal(null)} />}
         {modal?.type === "project" && <ProjectForm initial={modal.initial} onSave={(p) => saveGeneric("projects", p, "project")} onClose={() => setModal(null)} />}
         {modal?.type === "inhouse" && <InHouseForm initial={modal.initial} team={team} onSave={(x) => saveOwned("inhouse", x)} onClose={() => setModal(null)} />}
+        {modal?.type === "teamcfg" && <TeamConfigForm initial={modal.initial} roster={team.filter((p) => p.role !== "client" && p.active !== false)} onSave={saveTeamCfg} onClose={() => setModal(null)} />}
         {modal?.type === "student" && <StudentForm initial={modal.initial} onSave={(s) => saveGeneric("students", s, "student")} onClose={() => setModal(null)} />}
         {modal?.type === "marketing" && <MarketingForm initial={modal.initial} onSave={(m) => saveGeneric("marketing", m, "marketing client")} onClose={() => setModal(null)} />}
         {modal?.type === "concept" && <ConceptForm initial={modal.initial} onSave={(c) => saveGeneric("concepts", c, "idea")} onClose={() => setModal(null)} />}
