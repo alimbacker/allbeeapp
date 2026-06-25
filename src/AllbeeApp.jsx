@@ -7,7 +7,7 @@ import {
   Mail, KeyRound, LogIn, RefreshCw, CloudOff,
   Users, UserCheck, CalendarDays, MessageSquare, Plane, Clock, CheckCircle2, XCircle, Hourglass, ShieldCheck,
   ArrowLeft, Undo2, RotateCcw, Paperclip, Link2, ExternalLink, Activity, Filter, Send, FileText, Sheet, Tag,
-  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote, User, Sparkles,
+  Copy, Eye, EyeOff, Lock as LockIcon, Unlock as UnlockIcon, Award, Star, BookOpen, Bell, Building2, Phone, UserPlus, Megaphone as MegaphoneIcon, BadgeCheck, Banknote, User, Sparkles, Home, Coins,
 } from "lucide-react";
 import { supabase } from "./supabaseClient";
 
@@ -47,6 +47,8 @@ const NOTIF_LEVELS = ["General", "Important", "Urgent"];
 const NOTIF_AUDIENCES = [["all", "Everyone"], ["staff", "Staff only"], ["intern", "Interns only"], ["accountant", "Accountants only"], ["admin", "Admins only"]];
 const INVOICE_STATUS = ["Draft", "Sent", "Paid", "Overdue", "Cancelled"];
 const LEAD_SERVICES = ["Website", "App", "Digital marketing", "Course", "Branding", "Other"];
+const INHOUSE_STAGES = ["Idea", "Planning", "Building", "Testing", "Launched", "On hold"];
+const INHOUSE_CATEGORIES = ["Product", "Internal tool", "Marketing", "R&D", "Automation", "Other"];
 const ONLINE_MS = 2 * 60 * 1000; // a member is "online" if active within 2 minutes
 const isOnline = (p) => !!(p && p.last_active) && (Date.now() - new Date(p.last_active).getTime()) < ONLINE_MS;
 function notifVisibleTo(n, profile) {
@@ -81,6 +83,7 @@ const MODULE_LABEL = {
   notifications: "Notifications", invoices: "Invoices",
   prompts: "Prompts",
   sheets: "Sheets",
+  inhouse: "In-house projects",
 };
 const LOGO_FULL = "/allbee-logo.png";   // full lockup (monogram + wordmark)
 const LOGO_ICON = "/allbee-icon.png";   // square monogram
@@ -96,7 +99,7 @@ const STATUS_OPTIONS = ["active", "on_leave", "suspended", "resigned", "terminat
 // statuses that revoke sign-in (the row's `active` flag is set from this)
 const STATUS_ACTIVE = { active: true, on_leave: true, suspended: false, resigned: false, terminated: false };
 // business modules an admin can grant to an individual staff member, one by one
-const GRANTABLE_MODULES = [["projects", "Projects"], ["leads", "Leads"], ["clients", "Clients"], ["quotations", "Quotations"], ["invoices", "Invoices"], ["portal-posts", "Client updates"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"], ["sheets", "Sheets"], ["prompts", "Prompts"]];
+const GRANTABLE_MODULES = [["projects", "Projects"], ["inhouse", "In-house projects"], ["leads", "Leads"], ["clients", "Clients"], ["quotations", "Quotations"], ["invoices", "Invoices"], ["portal-posts", "Client updates"], ["courses", "Courses"], ["marketing", "Marketing"], ["concepts", "Concepts"], ["sheets", "Sheets"], ["prompts", "Prompts"]];
 // Who must accept Terms & Conditions before using the app. Partners (superadmin)
 // author the agreements, so they're exempt; everyone else signs.
 const TNC_ROLES = ["admin", "accountant", "staff", "intern"];
@@ -201,7 +204,7 @@ const startOfWeek = (ref = new Date()) => { const d = new Date(ref); const day =
    only the rows that actually changed (insert / update / delete).
 ─────────────────────────────────────────────────────────────────────────── */
 const TABLES = ["transactions", "withdrawals", "tasks", "projects", "students", "marketing", "concepts", "audit", "attendance", "leave", "updates", "recycle",
-  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts", "sheets"];
+  "leads", "clients", "quotations", "planned", "announcements", "documents", "knowledge", "chat", "rewards", "vault", "portal_posts", "notifications", "invoices", "resignations", "prompts", "sheets", "inhouse", "payroll"];
 
 async function fetchAll() {
   const db = emptyDB();
@@ -370,6 +373,7 @@ const emptyDB = () => ({
   announcements: [], documents: [], knowledge: [], chat: [],
   rewards: [], vault: [], portal_posts: [],
   notifications: [], invoices: [], resignations: [], prompts: [], sheets: [],
+  inhouse: [], payroll: [],
 });
 
 /* ── derived calculations ─────────────────────────────────────────────── */
@@ -505,6 +509,56 @@ function marketingDue(m) {
   return { label: "Due " + fmtDate(due.toISOString().slice(0, 10)), tone: "muted" };
 }
 
+/* ── staff earnings (salary + commission) ─────────────────────────────────
+   A staff member earns two ways, configured per-person on the Staff salary
+   screen and stored in the `payroll` table:
+     • a fixed monthly salary, and/or
+     • a commission — a percentage of the value of every revenue item they
+       personally brought in (a student they registered, a project they added,
+       or a client they own that carries a deal value).
+   Commission is "realised" once the item is actually earning (student fee Paid,
+   project Completed, client Active) and otherwise sits in the pipeline. */
+function payrollFor(payroll, userId) {
+  return (payroll || []).find((r) => r.userId === userId) || null;
+}
+function monthsSince(iso) {
+  if (!iso) return 1;
+  const j = new Date(iso);
+  if (isNaN(j)) return 1;
+  const now = new Date();
+  return Math.max(1, (now.getFullYear() - j.getFullYear()) * 12 + (now.getMonth() - j.getMonth()) + 1);
+}
+function staffEarnings(db, payroll, person, joinedISO) {
+  const cfg = payrollFor(payroll, person.id);
+  const pct = Number(cfg?.commissionPct) || 0;
+  const fixedMonthly = Number(cfg?.fixedMonthly) || 0;
+  const items = [];
+  const add = (kind, name, base, realized, status, date, id) => {
+    const b = Number(base) || 0;
+    items.push({ kind, name: name || "—", base: b, realized, status, date: date || "", id, commission: round2((b * pct) / 100) });
+  };
+  for (const s of db.students || []) {
+    if (s.createdById !== person.id) continue;
+    add("Student", s.name, s.fee, s.paymentStatus === "Paid", s.paymentStatus || "Unpaid", s.joinDate, s.id);
+  }
+  for (const p of db.projects || []) {
+    if (p.createdById !== person.id) continue;
+    if ((p.approvalStatus || "approved") === "rejected") continue;
+    add("Project", p.name, p.cost, p.stage === "Completed", p.stage || "Lead", p.start, p.id);
+  }
+  for (const c of db.clients || []) {
+    if (c.ownerId !== person.id || !(Number(c.value) || 0)) continue;
+    add("Client", c.name, c.value, c.status === "Active", c.status || "Prospect", c.createdAt ? new Date(c.createdAt).toISOString().slice(0, 10) : "", c.id);
+  }
+  items.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const realisedComm = round2(items.filter((i) => i.realized).reduce((s, i) => s + i.commission, 0));
+  const pipelineComm = round2(items.filter((i) => !i.realized).reduce((s, i) => s + i.commission, 0));
+  const months = monthsSince(joinedISO);
+  const salaryToDate = round2(fixedMonthly * months);
+  const configured = !!cfg && (fixedMonthly > 0 || pct > 0);
+  return { cfg, pct, fixedMonthly, items, realisedComm, pipelineComm, months, salaryToDate, configured, totalToDate: round2(realisedComm + salaryToDate) };
+}
+
 /* ══════════════════════════════════════════════════════════════════════
    STYLES
 ══════════════════════════════════════════════════════════════════════ */
@@ -544,15 +598,15 @@ const CSS = `
 .sidebar-foot { margin-top:auto; padding-top:12px; border-top:1px solid var(--border); }
 
 .main { display:flex; flex-direction:column; min-width:0; }
-.topbar { display:flex; align-items:center; gap:14px; padding:14px 22px; border-bottom:1px solid var(--border);
-  background:color-mix(in srgb,var(--surface) 80%,transparent); backdrop-filter:blur(8px); position:sticky; top:0; z-index:20; }
+.topbar { display:flex; align-items:center; gap:12px; padding:8px 18px; border-bottom:1px solid var(--border);
+  background:color-mix(in srgb,var(--surface) 80%,transparent); backdrop-filter:blur(8px); position:sticky; top:0; z-index:20; min-height:50px; }
 .hamburger { display:none; }
-.topbar h2 { font-size:18px; margin:0; font-weight:700; }
-.topbar-sub { font-size:12px; color:var(--muted); margin-top:1px; }
-.company-pill { margin-left:auto; display:flex; align-items:center; gap:10px; background:var(--surface);
-  border:1px solid var(--border); padding:7px 13px; border-radius:11px; box-shadow:var(--shadow); }
-.company-pill .lbl { font-size:10px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted); }
-.company-pill .val { font-size:16px; font-weight:700; }
+.topbar h2 { font-size:15px; margin:0; font-weight:700; line-height:1.15; }
+.topbar-sub { font-size:11px; color:var(--muted); margin-top:0; }
+.company-pill { margin-left:auto; display:flex; align-items:center; gap:7px; background:var(--surface);
+  border:1px solid var(--border); padding:5px 11px; border-radius:9px; box-shadow:var(--shadow); }
+.company-pill .lbl { font-size:11px; color:var(--muted); font-weight:600; }
+.company-pill .val { font-size:14px; font-weight:700; }
 .iconbtn { width:36px; height:36px; border-radius:9px; border:1px solid var(--border); background:var(--surface);
   display:grid; place-items:center; cursor:pointer; color:var(--ink); transition:.12s; }
 .iconbtn:hover { background:var(--surface-2); }
@@ -573,10 +627,13 @@ const CSS = `
 .quick-actions { display:flex; gap:10px; flex-wrap:wrap; }
 .who-cell { display:inline-flex; align-items:center; gap:9px; }
 
-.content { padding:22px; max-width:1180px; width:100%; }
-.page-head { display:flex; align-items:center; gap:12px; margin-bottom:18px; flex-wrap:wrap; }
-.page-head h3 { font-size:20px; margin:0; font-weight:700; }
+.content { padding:18px 22px 22px; max-width:1180px; width:100%; }
+.page-head { display:flex; align-items:center; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.page-head h3 { font-size:19px; margin:0; font-weight:700; }
 .page-head .spacer { flex:1; }
+.topbar .iconbtn { width:32px; height:32px; }
+.topbar .userchip { padding:4px 9px 4px 5px; }
+.topbar .dropdown { top:42px; }
 
 .card { background:var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
 .cards-grid { display:grid; gap:14px; }
@@ -2514,6 +2571,8 @@ function StaffDashboard({ db, me, go, mutate, openModal, team = [] }) {
   const myUpdatesToday = db.updates.filter((u) => u.userId === me.id && u.date === today);
   const hr = new Date().getHours();
   const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
+  const myJoin = team.find((p) => p.id === me.id)?.created_at;
+  const earn = staffEarnings(db, db.payroll, { id: me.id, name: me.name }, myJoin);
 
   const doCheckIn = () => mutate((d) => ({ ...d, attendance: [...d.attendance, { id: uid(), userId: me.id, userName: me.name, date: today, checkIn: new Date().toISOString(), checkOut: null, createdAt: Date.now() }] }), { action: "checked in", module: "Attendance" });
   const doCheckOut = () => { if (!openSess) return; mutate((d) => ({ ...d, attendance: d.attendance.map((a) => a.id === openSess.id ? { ...a, checkOut: new Date().toISOString() } : a) }), { action: "checked out", module: "Attendance" }); };
@@ -2545,6 +2604,9 @@ function StaffDashboard({ db, me, go, mutate, openModal, team = [] }) {
           <div className="lbl"><Plane size={14} /> Pending leave</div><div className="num">{myPendingLeave.length}</div></div>
         <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("updates")}>
           <div className="lbl"><MessageSquare size={14} /> Today's updates</div><div className="num">{myUpdatesToday.length}</div></div>
+        {earn.configured && <div className="card stat" style={{ cursor: "pointer" }} onClick={() => go("earnings")}>
+          <div className="lbl"><Coins size={14} /> Earned to date</div><div className="num mono pos-txt">{money(earn.totalToDate)}</div>
+          <div className="sub">{earn.pipelineComm > 0 ? `${money(earn.pipelineComm)} in pipeline` : "Tap to see breakdown"}</div></div>}
       </div>
 
       <div className="quick-actions">
@@ -3299,6 +3361,7 @@ const NAV = [
   ["invoices", "Invoices", Banknote, "perm:invoices"],
   ["portal-posts", "Client updates", ExternalLink, "perm:portal-posts"],
   ["projects", "Projects", FolderKanban, "perm:projects"],
+  ["inhouse", "In-house projects", Home, "perm:inhouse"],
   ["courses", "Courses", GraduationCap, "perm:courses"],
   ["marketing", "Marketing", Megaphone, "perm:marketing"],
   ["concepts", "Concepts", Lightbulb, "perm:concepts"],
@@ -3315,7 +3378,9 @@ const NAV = [
   ["terms", "Terms & conditions", BadgeCheck, "everyone"],
   ["performance", "Performance", TrendingUp, "insight"],
   ["rewards", "Rewards", Award, "collab"],
+  ["earnings", "My earnings", Coins, "everyone"],
   ["team", "Team", Users, "admin"],
+  ["staff-salary", "Staff salary", Banknote, "admin"],
   ["progress", "Progress", Activity, "work"],
   ["recently-deleted", "Recently deleted", Trash2, "admin"],
   ["audit", "Audit log", ScrollText, "admin"],
@@ -3538,7 +3603,7 @@ function ClientForm({ initial, onSave, onClose, existing }) {
   const dupe = (existing || []).find((c) => c.id !== f.id && ((f.phone && c.phone && c.phone.replace(/\D/g, "") === f.phone.replace(/\D/g, "")) || (f.email && c.email && c.email.toLowerCase() === f.email.toLowerCase())));
   const save = () => {
     if (!f.name.trim()) { setErr("Add the client's name."); return; }
-    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), name: f.name.trim() });
+    onSave({ ...f, id: f.id || uid(), createdAt: f.createdAt || Date.now(), name: f.name.trim(), value: Number(f.value) || 0 });
   };
   return (
     <Modal title={f.id ? "Edit client" : "New client"} onClose={onClose}
@@ -3553,6 +3618,7 @@ function ClientForm({ initial, onSave, onClose, existing }) {
         <Field label="Company"><input className="input" value={f.company} onChange={(e) => set("company", e.target.value)} placeholder="Business name (optional)" /></Field>
         <Field label="Status"><select className="select" value={f.status || "Prospect"} onChange={(e) => set("status", e.target.value)}>{CLIENT_STATUS.map((x) => <option key={x}>{x}</option>)}</select></Field>
       </div>
+      <Field label="Deal value" hint="Contract value for this client. Commission credits the person who added them once the status is Active."><input className="input mono" type="number" min="0" value={f.value ?? ""} onChange={(e) => set("value", e.target.value)} placeholder="0" /></Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Anything worth remembering" /></Field>
     </Modal>
   );
@@ -4936,6 +5002,233 @@ function ManageUserModal({ person, onClose }) {
   );
 }
 
+/* ── In-house projects ─────────────────────────────────────────────────────
+   The company's own initiatives (products, internal tools, R&D) — tracked
+   separately from client projects. No client billing; just status + progress. */
+function InHouseForm({ initial, team = [], onSave, onClose }) {
+  const [f, setF] = useState(() => ({ name: "", category: "Product", lead: "", stage: "Idea", priority: "Medium", start: todayISO(), target: "", budget: "", progress: 0, notes: "", ...initial }));
+  const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
+  const valid = f.name.trim().length > 0;
+  const leads = team.filter((p) => p.role !== "client").map((p) => p.name);
+  const save = () => {
+    if (!valid) return;
+    onSave({ ...initial, id: initial?.id || uid(), name: f.name.trim(), category: f.category, lead: f.lead, stage: f.stage, priority: f.priority, start: f.start, target: f.target, budget: Number(f.budget) || 0, progress: Math.max(0, Math.min(100, Number(f.progress) || 0)), notes: f.notes.trim(), createdAt: initial?.createdAt || Date.now() });
+    onClose();
+  };
+  return (
+    <Modal title={initial?.id ? "Edit in-house project" : "New in-house project"} onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" onClick={save} disabled={!valid}><Check size={16} />Save project</button></>}>
+      <div className="grid2">
+        <Field label="Project name" required><input className="input" value={f.name} onChange={(e) => up("name", e.target.value)} placeholder="Internal CRM revamp" /></Field>
+        <Field label="Category"><SelectOther value={f.category} onChange={(v) => up("category", v)} options={INHOUSE_CATEGORIES} placeholder="Custom category…" /></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Project lead"><select className="select" value={f.lead} onChange={(e) => up("lead", e.target.value)}><option value="">Unassigned</option>{leads.map((n) => <option key={n} value={n}>{n}</option>)}</select></Field>
+        <Field label="Priority"><select className="select" value={f.priority} onChange={(e) => up("priority", e.target.value)}>{PRIORITIES.map((p) => <option key={p}>{p}</option>)}</select></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Start date"><input className="input" type="date" value={f.start} onChange={(e) => up("start", e.target.value)} /></Field>
+        <Field label="Target date"><input className="input" type="date" value={f.target} onChange={(e) => up("target", e.target.value)} /></Field>
+      </div>
+      <div className="grid2">
+        <Field label="Stage"><select className="select" value={f.stage} onChange={(e) => up("stage", e.target.value)}>{INHOUSE_STAGES.map((s) => <option key={s}>{s}</option>)}</select></Field>
+        <Field label="Budget (optional)"><input className="input mono" type="number" min="0" value={f.budget} onChange={(e) => up("budget", e.target.value)} placeholder="0" /></Field>
+      </div>
+      <Field label={`Progress · ${Math.max(0, Math.min(100, Number(f.progress) || 0))}%`}><input type="range" min="0" max="100" step="5" value={f.progress} onChange={(e) => up("progress", e.target.value)} style={{ width: "100%" }} /></Field>
+      <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => up("notes", e.target.value)} placeholder="Goal, scope, who's involved…" /></Field>
+    </Modal>
+  );
+}
+
+function InHouse({ db, mutate, openModal, removeItem, isAdmin, me, team = [] }) {
+  const list = [...(db.inhouse || [])].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const canEdit = (p) => isAdmin || p.ownerId === me?.id;
+  const setStage = (p, stage) => mutate((d) => ({ ...d, inhouse: d.inhouse.map((x) => x.id === p.id ? { ...x, stage, progress: stage === "Launched" ? 100 : x.progress } : x) }), { action: `moved "${p.name}" to ${stage}`, module: "In-house projects" });
+  const del = (p) => removeItem("inhouse", p, { name: p.name, audit: `deleted in-house project "${p.name}"` });
+  const active = list.filter((p) => p.stage !== "Launched" && p.stage !== "On hold").length;
+  const launched = list.filter((p) => p.stage === "Launched").length;
+  const budget = list.reduce((s, p) => s + (Number(p.budget) || 0), 0);
+  const stageTone = (s) => s === "Launched" ? "pos" : s === "On hold" ? "neg" : s === "Building" || s === "Testing" ? "accent" : "pri";
+  return (
+    <div className="content">
+      <div className="page-head"><h3>In-house projects</h3><span className="spacer" /><button className="btn primary" onClick={() => openModal({ type: "inhouse" })}><Plus size={16} />New project</button></div>
+      <div className="sumrow">
+        <div className="card"><div className="k"><Home size={14} /> Total</div><div className="v">{list.length}</div></div>
+        <div className="card"><div className="k"><Activity size={14} /> In progress</div><div className="v">{active}</div></div>
+        <div className="card"><div className="k"><CheckCircle2 size={14} /> Launched</div><div className="v">{launched}</div></div>
+        {budget > 0 && <div className="card"><div className="k"><Wallet size={14} /> Budget</div><div className="v mono">{money(budget)}</div></div>}
+      </div>
+      <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))" }}>
+        {list.length === 0 ? <div className="card" style={{ gridColumn: "1/-1" }}><Empty icon={<Home size={22} color="var(--muted)" />} title="No in-house projects yet" text="Track the company's own products, internal tools and R&D from Idea to Launched." action={<button className="btn primary" onClick={() => openModal({ type: "inhouse" })}><Plus size={16} />New project</button>} /></div>
+          : list.map((p) => {
+            const pct = Math.max(0, Math.min(100, Number(p.progress) || 0));
+            return (
+              <div key={p.id} className="card stat" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ flex: 1 }}><div style={{ fontWeight: 700, fontSize: 15 }}>{p.name}</div><div className="sub">{p.category}{p.lead ? ` · ${p.lead}` : ""}</div></div>
+                  {p.priority && <span className={"badge " + priorityTone(p.priority)}>{p.priority}</span>}
+                </div>
+                <select className="select" value={p.stage} onChange={(e) => setStage(p, e.target.value)}>{INHOUSE_STAGES.map((s) => <option key={s}>{s}</option>)}</select>
+                <div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--muted)", marginBottom: 4 }}><span className={"badge " + stageTone(p.stage)}>{p.stage}</span><span className="mono">{pct}%</span></div>
+                  <div style={{ height: 6, borderRadius: 6, background: "var(--surface-2)", overflow: "hidden" }}><div style={{ height: "100%", width: pct + "%", background: pct === 100 ? "var(--pos)" : "var(--primary)", transition: ".2s" }} /></div>
+                </div>
+                <div className="item-meta">{p.start && <span>Start {fmtDate(p.start)}</span>}{p.target && <span>Target {fmtDate(p.target)}</span>}{Number(p.budget) > 0 && <span className="mono">{money(p.budget)}</span>}</div>
+                {p.notes && <div className="hint-line" style={{ lineHeight: 1.5 }}>{p.notes.length > 120 ? p.notes.slice(0, 120) + "…" : p.notes}</div>}
+                <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
+                  {canEdit(p) && <button className="btn sm" onClick={() => openModal({ type: "inhouse", initial: p })}><Pencil size={13} />Edit</button>}
+                  {canEdit(p) && <button className="btn sm danger" onClick={() => openModal({ type: "deleteConfirm", title: "Delete project?", body: `Delete "${p.name}"?`, note: "It moves to Recently deleted — restore within 60 days.", onConfirm: () => del(p) })}><Trash2 size={13} /></button>}
+                  {!canEdit(p) && <span className="hint-line" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4 }}><LockIcon size={11} />{p.owner ? `Added by ${p.owner}` : "Admin-only"}</span>}
+                </div>
+              </div>
+            );
+          })}
+      </div>
+    </div>
+  );
+}
+
+/* ── Staff salary (admin) ──────────────────────────────────────────────── */
+function SalaryRow({ person, db, payroll, onSave }) {
+  const cfg = payrollFor(payroll, person.id);
+  const [fixed, setFixed] = useState(cfg?.fixedMonthly != null ? String(cfg.fixedMonthly) : "");
+  const [pct, setPct] = useState(cfg?.commissionPct != null ? String(cfg.commissionPct) : "");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => { setFixed(cfg?.fixedMonthly != null ? String(cfg.fixedMonthly) : ""); setPct(cfg?.commissionPct != null ? String(cfg.commissionPct) : ""); }, [cfg?.fixedMonthly, cfg?.commissionPct]);
+  const E = staffEarnings(db, payroll, { id: person.id, name: person.name }, person.created_at);
+  const dirty = String(Number(fixed) || 0) !== String(E.fixedMonthly) || String(Number(pct) || 0) !== String(E.pct);
+  const save = () => { onSave(person, { fixedMonthly: Number(fixed) || 0, commissionPct: Number(pct) || 0 }); setSaved(true); setTimeout(() => setSaved(false), 1500); };
+  return (
+    <div className="card stat" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="who-cell">
+        <Avatar name={person.name} url={person.photo_url} size={30} />
+        <span><div style={{ fontWeight: 700 }}>{person.name}</div><div className="hint-line" style={{ fontSize: 11 }}>{ROLE_LABEL[person.role] || person.role}{person.designation ? ` · ${person.designation}` : ""}</div></span>
+      </div>
+      <div className="grid2">
+        <Field label="Fixed salary / month"><input className="input mono" type="number" min="0" value={fixed} onChange={(e) => setFixed(e.target.value)} placeholder="0" /></Field>
+        <Field label="Commission %"><input className="input mono" type="number" min="0" max="100" value={pct} onChange={(e) => setPct(e.target.value)} placeholder="0" /></Field>
+      </div>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", fontSize: 12.5 }}>
+        <span className="hint-line">Commission earned <b className="pos-txt mono" style={{ marginLeft: 4 }}>{money(E.realisedComm)}</b></span>
+        <span className="hint-line">Pipeline <b className="mono" style={{ marginLeft: 4 }}>{money(E.pipelineComm)}</b></span>
+        {E.fixedMonthly > 0 && <span className="hint-line">Salary to date <b className="mono" style={{ marginLeft: 4 }}>{money(E.salaryToDate)}</b></span>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <button className="btn sm primary" onClick={save} disabled={!dirty}><Check size={14} />Save</button>
+        {saved && <span className="hint-line" style={{ color: "var(--pos)" }}><Check size={13} style={{ verticalAlign: -2 }} /> Saved</span>}
+        {!E.configured && !dirty && <span className="hint-line">No pay set yet</span>}
+      </div>
+    </div>
+  );
+}
+
+function StaffSalary({ db, team, mutate, me }) {
+  const roster = team.filter((p) => p.role !== "client" && p.role !== "superadmin");
+  const setPay = (person, patch) => mutate((d) => {
+    const exists = (d.payroll || []).some((r) => r.userId === person.id);
+    const payroll = exists
+      ? d.payroll.map((r) => r.userId === person.id ? { ...r, ...patch, updatedAt: Date.now() } : r)
+      : [...(d.payroll || []), { id: uid(), userId: person.id, userName: person.name, fixedMonthly: 0, commissionPct: 0, createdAt: Date.now(), ...patch }];
+    return { ...d, payroll };
+  }, { action: `updated ${person.name}'s pay settings`, module: "Staff salary" });
+  const totalCommission = roster.reduce((s, p) => s + staffEarnings(db, db.payroll, { id: p.id, name: p.name }, p.created_at).realisedComm, 0);
+  const totalMonthly = (db.payroll || []).reduce((s, r) => s + (Number(r.fixedMonthly) || 0), 0);
+  return (
+    <div className="content">
+      <div className="page-head"><h3>Staff salary</h3></div>
+      <div className="banner" style={{ marginLeft: 0, marginRight: 0, marginBottom: 14 }}><Coins size={15} /> Set each person's fixed monthly salary, a commission rate, or both. Commission is a share of the value of every student, project or client they bring in.</div>
+      <div className="sumrow">
+        <div className="card"><div className="k"><Users size={14} /> People</div><div className="v">{roster.length}</div></div>
+        <div className="card"><div className="k"><Banknote size={14} /> Monthly salaries</div><div className="v mono">{money(totalMonthly)}</div></div>
+        <div className="card"><div className="k"><Coins size={14} /> Commission earned</div><div className="v mono">{money(totalCommission)}</div></div>
+      </div>
+      {roster.length === 0 ? <div className="card"><Empty icon={<Users size={22} color="var(--muted)" />} title="No team members yet" text="Add staff on the Team screen, then set their pay here." /></div>
+        : <div className="cards-grid" style={{ gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))" }}>
+          {roster.map((p) => <SalaryRow key={p.id} person={p} db={db} payroll={db.payroll} onSave={setPay} />)}
+        </div>}
+      <div className="hint-line" style={{ marginTop: 14, lineHeight: 1.5 }}>
+        Commission is "earned" once an item is actually paying — a student fee marked Paid, a project marked Completed, or a client set to Active. Until then it sits in the pipeline. Everyone can see their own breakdown on the My earnings screen.
+      </div>
+    </div>
+  );
+}
+
+/* ── My earnings (every member sees their own) ─────────────────────────── */
+function MyEarnings({ db, me, role, payroll, profile, go }) {
+  if (role === "superadmin") {
+    return (
+      <div className="content">
+        <div className="page-head"><h3>My earnings</h3></div>
+        <div className="card"><Empty icon={<Wallet size={22} color="var(--muted)" />} title="Partners draw from the profit share" text="As a partner you don't take a fixed salary or commission — your earnings come from the Haji & Alim split tracked in Share & accounts." action={<button className="btn primary" onClick={() => go("accounts")}><Wallet size={16} />Open Share & accounts</button>} /></div>
+      </div>
+    );
+  }
+  const E = staffEarnings(db, payroll, { id: me.id, name: me.name }, profile?.created_at);
+  const realised = E.items.filter((i) => i.realized);
+  const pipeline = E.items.filter((i) => !i.realized);
+  const kindTone = (k) => k === "Student" ? "pri" : k === "Project" ? "accent" : "pos";
+  const Row = ({ i }) => (
+    <tr>
+      <td><div style={{ fontWeight: 600 }}>{i.name}</div>{i.date && <div className="hint-line" style={{ fontSize: 11 }}>{fmtDate(i.date)}</div>}</td>
+      <td><span className={"badge " + kindTone(i.kind)}>{i.kind}</span></td>
+      <td className="num-cell mono">{money(i.base)}</td>
+      <td><span className="hint-line">{i.status}</span></td>
+      <td className="num-cell mono" style={{ fontWeight: 700, color: i.realized ? "var(--pos)" : "var(--muted)" }}>{money(i.commission)}</td>
+    </tr>
+  );
+  return (
+    <div className="content">
+      <div className="page-head"><h3>My earnings</h3></div>
+      {!E.configured && E.items.length === 0 ? (
+        <div className="card"><Empty icon={<Coins size={22} color="var(--muted)" />} title="No earnings set up yet" text="Once an admin sets your salary or commission rate, what you earn from ALLBEE shows up here — including a share of every student, project and client you bring in." /></div>
+      ) : (
+        <>
+          <div className="sumrow">
+            <div className="card"><div className="k"><Wallet size={14} /> Earned to date</div><div className="v mono pos-txt">{money(E.totalToDate)}</div></div>
+            <div className="card"><div className="k"><Coins size={14} /> Commission earned</div><div className="v mono">{money(E.realisedComm)}</div></div>
+            <div className="card"><div className="k"><Hourglass size={14} /> In pipeline</div><div className="v mono">{money(E.pipelineComm)}</div></div>
+            {E.fixedMonthly > 0 && <div className="card"><div className="k"><Banknote size={14} /> Salary / month</div><div className="v mono">{money(E.fixedMonthly)}</div></div>}
+          </div>
+
+          {E.fixedMonthly > 0 && (
+            <div className="card stat" style={{ marginBottom: 16 }}>
+              <div className="lbl"><Banknote size={14} /> Fixed salary</div>
+              <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginTop: 10 }}>
+                <div><div className="hint-line">Per month</div><div className="mono" style={{ fontSize: 18, fontWeight: 700 }}>{money(E.fixedMonthly)}</div></div>
+                <div><div className="hint-line">Months on the team</div><div className="mono" style={{ fontSize: 18, fontWeight: 700 }}>{E.months}</div></div>
+                <div><div className="hint-line">Salary to date (estimate)</div><div className="mono" style={{ fontSize: 18, fontWeight: 700 }}>{money(E.salaryToDate)}</div></div>
+              </div>
+              <div className="hint-line" style={{ marginTop: 8 }}>Estimated from your joining date — your actual payslip is settled by the finance team.</div>
+            </div>
+          )}
+
+          <div className="card">
+            <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <Coins size={15} /><span style={{ fontWeight: 700 }}>Commission</span>
+              {E.pct > 0 ? <span className="badge pri">{E.pct}% of each deal</span> : <span className="hint-line">No commission rate set — you're on a fixed salary.</span>}
+            </div>
+            {E.items.length === 0 ? (
+              <Empty icon={<UserPlus size={22} color="var(--muted)" />} title="Nothing to show yet" text="Register a student, add a project, or bring in a client with a deal value and your commission appears here." />
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table className="tbl">
+                  <thead><tr><th>Item</th><th>Type</th><th className="num-cell">Value</th><th>Status</th><th className="num-cell">Your commission</th></tr></thead>
+                  <tbody>
+                    {realised.length > 0 && <tr><td colSpan={5} style={{ background: "var(--surface-2)", fontSize: 11, textTransform: "uppercase", letterSpacing: ".5px", color: "var(--muted)", fontWeight: 700 }}>Earned</td></tr>}
+                    {realised.map((i) => <Row key={i.id} i={i} />)}
+                    {pipeline.length > 0 && <tr><td colSpan={5} style={{ background: "var(--surface-2)", fontSize: 11, textTransform: "uppercase", letterSpacing: ".5px", color: "var(--muted)", fontWeight: 700 }}>Pipeline — not earned yet</td></tr>}
+                    {pipeline.map((i) => <Row key={i.id} i={i} />)}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [db, setDb] = useState(null);
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
@@ -5267,6 +5560,10 @@ export default function App() {
     if (coll === "projects" && !db.projects.some((x) => x.id === item.id)) {
       toSave = { ...item, approvalStatus: isAdmin ? "approved" : "pending", createdById: me.id, ownerName: currentUser };
     }
+    // stamp the registrar on new students so commission credits the right person
+    if (coll === "students" && !db.students.some((x) => x.id === item.id)) {
+      toSave = { ...item, createdById: me.id, ownerName: currentUser };
+    }
     mutate((d) => ({ ...d, [coll]: d[coll].some((x) => x.id === toSave.id) ? d[coll].map((x) => x.id === toSave.id ? toSave : x) : [...d[coll], toSave] }),
       { action: `${db[coll].some((x) => x.id === item.id) ? "updated" : "added"} ${label}${coll === "projects" && !isAdmin && !db.projects.some((x) => x.id === item.id) ? " (awaiting approval)" : ""}`, module: label === "project" ? "Projects" : label === "student" ? "Courses" : label === "marketing client" ? "Marketing" : "Concepts" });
   };
@@ -5343,6 +5640,7 @@ export default function App() {
       case "leave": return <Leave db={db} mutate={mutate} me={me} isAdmin={isAdmin} openModal={openModal} />;
       case "updates": return <Updates db={db} mutate={mutate} me={me} isAdmin={isAdmin} removeItem={removeItem} openModal={openModal} />;
       case "team": return <Team team={team} me={me} changeProfile={changeProfile} db={db} resolveResign={resolveResign} />;
+      case "staff-salary": return <StaffSalary db={db} team={team} mutate={mutate} me={me} />;
       case "accounts": return <Accounts db={db} bal={bal} mutate={mutate} openModal={openModal} openBalance={openBalance} removeItem={removeItem} locks={locks} lockPeriod={lockPeriod} unlockPeriod={unlockPeriod} isSuper={isSuper} currentUser={currentUser} />;
       case "withdrawals": return <Withdrawals db={db} bal={bal} mutate={mutate} openModal={openModal} removeItem={removeItem} isSuper={isSuper} currentUser={currentUser} />;
       case "progress": return <Progress db={db} mutate={mutate} isAdmin={isAdmin} currentUser={currentUser} openTask={openTask} />;
@@ -5350,6 +5648,7 @@ export default function App() {
       case "courses": return <Courses db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
       case "marketing": return <Marketing db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} />;
       case "projects": return <Projects db={db} mutate={mutate} openModal={openModal} openIncome={openIncome} removeItem={removeItem} canFinance={canFinance} isAdmin={isAdmin} me={me} />;
+      case "inhouse": return <InHouse db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} team={team} />;
       case "leads": return <Leads db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} />;
       case "clients": return <Clients db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} isAdmin={isAdmin} me={me} portalClients={portalClients} deleteClientAccount={deleteClientAccount} />;
       case "quotations": return <Quotations db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} currentUser={currentUser} isAdmin={isAdmin} />;
@@ -5368,6 +5667,7 @@ export default function App() {
       case "chat": return <Chat db={db} mutate={mutate} me={me} team={team} onRefresh={reload} isAdmin={isAdmin} />;
       case "performance": return <Performance db={db} team={team} />;
       case "rewards": return <Rewards db={db} mutate={mutate} openModal={openModal} removeItem={removeItem} me={me} isAdmin={isAdmin} team={team} />;
+      case "earnings": return <MyEarnings db={db} me={me} role={role} payroll={db.payroll} profile={profile} go={go} />;
       case "recently-deleted": return <RecentlyDeleted db={db} openModal={openModal} restoreItem={restoreItem} />;
       case "audit": return <AuditLog db={db} />;
       case "settings": return <Settings db={db} mutate={mutate} replaceDB={replaceDB} syncError={syncError} currentUser={currentUser} role={role} teamCount={team.length} sessionEmail={session?.user?.email} config={config} saveTnc={saveTnc} saveRoleTnc={saveRoleTnc} saveCompany={saveCompany} />;
@@ -5447,8 +5747,10 @@ export default function App() {
               <button className="iconbtn hamburger" onClick={() => setMenuOpen((v) => !v)} aria-label="Menu"><Menu size={18} /></button>
               <div><h2>{routeTitle}</h2><div className="topbar-sub">ALLBEE Solutions · internal</div></div>
               {canFinance && (
-                <div className="company-pill">
-                  <div><div className="lbl">Company balance</div><div className="val mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</div></div>
+                <div className="company-pill" title="Company balance">
+                  <Wallet size={14} color="var(--muted)" />
+                  <span className="lbl">Balance</span>
+                  <span className="val mono" style={{ color: bal.company < 0 ? "var(--neg)" : "var(--ink)" }}>{money(bal.company)}</span>
                 </div>
               )}
               <div className="usermenu">
@@ -5489,6 +5791,7 @@ export default function App() {
         {modal?.type === "task" && <TaskForm initial={modal.initial} currentUser={currentUser} team={teamNames} isAdmin={isAdmin} onSave={(t) => saveTask(t, modal.fromConcept)} onClose={() => setModal(null)} />}
         {modal?.type === "leave" && <LeaveForm initial={modal.initial} me={me} onSave={(l) => mutate((d) => ({ ...d, leave: d.leave.some((x) => x.id === l.id) ? d.leave.map((x) => x.id === l.id ? l : x) : [...d.leave, l] }), { action: (db.leave.some((x) => x.id === l.id) ? "updated " : "submitted ") + l.type + " leave request", module: "Leave" })} onClose={() => setModal(null)} />}
         {modal?.type === "project" && <ProjectForm initial={modal.initial} onSave={(p) => saveGeneric("projects", p, "project")} onClose={() => setModal(null)} />}
+        {modal?.type === "inhouse" && <InHouseForm initial={modal.initial} team={team} onSave={(x) => saveOwned("inhouse", x)} onClose={() => setModal(null)} />}
         {modal?.type === "student" && <StudentForm initial={modal.initial} onSave={(s) => saveGeneric("students", s, "student")} onClose={() => setModal(null)} />}
         {modal?.type === "marketing" && <MarketingForm initial={modal.initial} onSave={(m) => saveGeneric("marketing", m, "marketing client")} onClose={() => setModal(null)} />}
         {modal?.type === "concept" && <ConceptForm initial={modal.initial} onSave={(c) => saveGeneric("concepts", c, "idea")} onClose={() => setModal(null)} />}
