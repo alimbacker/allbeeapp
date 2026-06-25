@@ -3443,12 +3443,24 @@ function Lock({ isDark, setDark }) {
       if (mode === "signin") {
         let loginEmail = email.trim();
         if (!loginEmail.includes("@")) {
-          // username path: resolve to the account email via the edge function
+          // Username path: resolve the username to its account email so we can
+          // sign in. Tries a SQL function first (no edge function needed — just
+          // run allbee-username-login.sql once), then falls back to the
+          // username-login edge function if that's what's deployed.
+          const uname = loginEmail.toLowerCase();
+          let resolved = "";
           try {
-            const { data, error } = await supabase.functions.invoke("username-login", { body: { username: loginEmail } });
-            if (error) throw error;
-            if (data && data.email) loginEmail = data.email; else throw new Error("no-match");
-          } catch (e2) { throw new Error("We couldn't find that username. Try signing in with your email instead."); }
+            const { data, error } = await supabase.rpc("username_to_email", { p_username: uname });
+            if (!error && data) resolved = typeof data === "string" ? data : (data.email || "");
+          } catch { /* RPC not installed — try the edge function next */ }
+          if (!resolved) {
+            try {
+              const { data, error } = await supabase.functions.invoke("username-login", { body: { username: uname } });
+              if (!error && data && data.email) resolved = data.email;
+            } catch { /* neither available */ }
+          }
+          if (!resolved) throw new Error("We couldn't find that username. Check it, or sign in with your email instead.");
+          loginEmail = resolved;
         }
         const { error } = await supabase.auth.signInWithPassword({ email: loginEmail, password: pw });
         if (error) throw error;
@@ -5020,13 +5032,15 @@ function ManageUserModal({ person, onClose }) {
    The company's own initiatives (products, internal tools, R&D) — tracked
    separately from client projects. No client billing; just status + progress. */
 function InHouseForm({ initial, team = [], onSave, onClose }) {
-  const [f, setF] = useState(() => ({ name: "", category: "Product", lead: "", stage: "Idea", priority: "Medium", start: todayISO(), target: "", budget: "", progress: 0, notes: "", ...initial }));
+  const [f, setF] = useState(() => ({ name: "", category: "Product", lead: "", stage: "Idea", priority: "Medium", start: todayISO(), target: "", budget: "", progress: 0, link: "", notes: "", ...initial }));
   const up = (k, v) => setF((s) => ({ ...s, [k]: v }));
   const valid = f.name.trim().length > 0;
   const leads = team.filter((p) => p.role !== "client").map((p) => p.name);
   const save = () => {
     if (!valid) return;
-    onSave({ ...initial, id: initial?.id || uid(), name: f.name.trim(), category: f.category, lead: f.lead, stage: f.stage, priority: f.priority, start: f.start, target: f.target, budget: Number(f.budget) || 0, progress: Math.max(0, Math.min(100, Number(f.progress) || 0)), notes: f.notes.trim(), createdAt: initial?.createdAt || Date.now() });
+    let link = f.link.trim();
+    if (link && !/^https?:\/\//i.test(link)) link = "https://" + link; // tolerate "site.com"
+    onSave({ ...initial, id: initial?.id || uid(), name: f.name.trim(), category: f.category, lead: f.lead, stage: f.stage, priority: f.priority, start: f.start, target: f.target, budget: Number(f.budget) || 0, progress: Math.max(0, Math.min(100, Number(f.progress) || 0)), link, notes: f.notes.trim(), createdAt: initial?.createdAt || Date.now() });
     onClose();
   };
   return (
@@ -5049,6 +5063,7 @@ function InHouseForm({ initial, team = [], onSave, onClose }) {
         <Field label="Budget (optional)"><input className="input mono" type="number" min="0" value={f.budget} onChange={(e) => up("budget", e.target.value)} placeholder="0" /></Field>
       </div>
       <Field label={`Progress · ${Math.max(0, Math.min(100, Number(f.progress) || 0))}%`}><input type="range" min="0" max="100" step="5" value={f.progress} onChange={(e) => up("progress", e.target.value)} style={{ width: "100%" }} /></Field>
+      <Field label="Project link" hint="Live URL, repo, or doc — shown as a clickable link on the card."><input className="input" type="url" value={f.link} onChange={(e) => up("link", e.target.value)} placeholder="https://edusphere.allbeesolutions.com/" /></Field>
       <Field label="Notes"><textarea className="textarea" value={f.notes} onChange={(e) => up("notes", e.target.value)} placeholder="Goal, scope, who's involved…" /></Field>
     </Modal>
   );
@@ -5088,6 +5103,7 @@ function InHouse({ db, mutate, openModal, removeItem, isAdmin, me, team = [] }) 
                   <div style={{ height: 6, borderRadius: 6, background: "var(--surface-2)", overflow: "hidden" }}><div style={{ height: "100%", width: pct + "%", background: pct === 100 ? "var(--pos)" : "var(--primary)", transition: ".2s" }} /></div>
                 </div>
                 <div className="item-meta">{p.start && <span>Start {fmtDate(p.start)}</span>}{p.target && <span>Target {fmtDate(p.target)}</span>}{Number(p.budget) > 0 && <span className="mono">{money(p.budget)}</span>}</div>
+                {p.link && <a href={p.link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--primary)", textDecoration: "none", fontWeight: 600, wordBreak: "break-all" }}><ExternalLink size={13} style={{ flex: "none" }} />{p.link.replace(/^https?:\/\//, "").replace(/\/$/, "")}</a>}
                 {p.notes && <div className="hint-line" style={{ lineHeight: 1.5 }}>{p.notes.length > 120 ? p.notes.slice(0, 120) + "…" : p.notes}</div>}
                 <div style={{ display: "flex", gap: 6, marginTop: 2, flexWrap: "wrap" }}>
                   {canEdit(p) && <button className="btn sm" onClick={() => openModal({ type: "inhouse", initial: p })}><Pencil size={13} />Edit</button>}
